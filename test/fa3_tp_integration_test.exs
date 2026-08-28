@@ -16,7 +16,7 @@ defmodule FA3TP.IntegrationTest do
 
   # External-library contract exercised by this test:
   #
-  #   * CUDA FFI target: FA3_TP_CALL_TARGET (default exla_fa3_forward)
+  #   * CUDA FFI target: exla_fa3_forward
   #   * operands: Q/K/V bf16, logical [batch, sequence, heads, dim]
   #   * results: O bf16 [batch, q_sequence, q_heads, value_dim]
   #              LSE f32 [batch, q_heads, q_sequence]
@@ -31,7 +31,7 @@ defmodule FA3TP.IntegrationTest do
     load_external_fa3!()
     hlo_dir = fresh_hlo_dir!()
 
-    target = System.get_env("FA3_TP_CALL_TARGET", "exla_fa3_forward")
+    target = "exla_fa3_forward"
     causal = env_boolean("FA3_TP_CAUSAL", true)
     mesh = %Nx.Mesh{name: "fa3_tp", shape: {2}}
     input_shardings = [%{2 => [0]}, %{2 => [0]}, %{2 => [0]}]
@@ -42,11 +42,7 @@ defmodule FA3TP.IntegrationTest do
     v = Nx.as_type(v_f32, {:bf, 16})
 
     forward = fn q, k, v ->
-      FA3TP.forward(q, k, v,
-        causal: causal,
-        call_target_name: target,
-        platforms: [:cuda]
-      )
+      FA3TP.forward(q, k, v, causal: causal)
     end
 
     # Gate 1: the native target itself must match an independent FP32 Nx oracle.
@@ -134,7 +130,7 @@ defmodule FA3TP.IntegrationTest do
 
     # Gate 4: BF16 and FP16 native forward/backward, including TP2 gradients,
     # must remain within the corresponding low-precision reference error.
-    assert_forward_backward_precisions!(target, causal, mesh, input_shardings)
+    assert_forward_backward_precisions!(causal, mesh, input_shardings)
 
     # Gate 5: timing is forbidden until a shard_jit-produced buffer can be fed
     # back to shard_jit. This catches executable device_id=-1 vs physical buffer
@@ -164,7 +160,7 @@ defmodule FA3TP.IntegrationTest do
     assert_matches_oracle!(resident_assembled, {q_f32, k_f32, v_f32}, {q, k, v}, causal)
 
     if env_boolean("FA3_TP_BENCHMARK", false) do
-      benchmark!(target, causal, mesh, input_shardings)
+      benchmark!(causal, mesh, input_shardings)
     end
   end
 
@@ -280,7 +276,7 @@ defmodule FA3TP.IntegrationTest do
            "the sharded output projection produced no all-reduce after FA3"
   end
 
-  defp assert_forward_backward_precisions!(target, causal, mesh, input_shardings) do
+  defp assert_forward_backward_precisions!(causal, mesh, input_shardings) do
     {q_f32, k_f32, v_f32} = deterministic_inputs({1, 32, 8, 2, 128})
     doutput_f32 = deterministic_tensor(q_f32.shape, 17, 8, 9)
 
@@ -309,11 +305,7 @@ defmodule FA3TP.IntegrationTest do
       doutput = Nx.as_type(doutput_f32, type)
 
       forward = fn q, k, v ->
-        FA3TP.forward(q, k, v,
-          causal: causal,
-          call_target_name: target,
-          platforms: [:cuda]
-        )
+        FA3TP.forward(q, k, v, causal: causal)
       end
 
       actual_forward = EXLA.jit(forward, client: :cuda).(q, k, v) |> to_host()
@@ -442,7 +434,7 @@ defmodule FA3TP.IntegrationTest do
 
   defp to_host(value), do: Nx.backend_copy(value, Nx.BinaryBackend)
 
-  defp benchmark!(target, causal, mesh, input_shardings) do
+  defp benchmark!(causal, mesh, input_shardings) do
     batch = env_integer("FA3_TP_BATCH", 4)
     seqlen = env_integer("FA3_TP_SEQLEN", 2048)
     q_heads = env_integer("FA3_TP_Q_HEADS", 24)
@@ -458,7 +450,6 @@ defmodule FA3TP.IntegrationTest do
         precision,
         type,
         {batch, seqlen, q_heads, kv_heads, dim},
-        target,
         causal,
         mesh,
         input_shardings,
@@ -470,8 +461,8 @@ defmodule FA3TP.IntegrationTest do
 
       benchmark =
         if env_boolean("FA3_TP_FORWARD_ONLY", false),
-          do: &benchmark_forward_only!/11,
-          else: &benchmark_precision!/11
+          do: &benchmark_forward_only!/10,
+          else: &benchmark_precision!/10
 
       apply(benchmark, args)
     end
@@ -481,7 +472,6 @@ defmodule FA3TP.IntegrationTest do
          precision,
          type,
          {batch, seqlen, q_heads, kv_heads, dim},
-         target,
          causal,
          mesh,
          input_shardings,
@@ -496,9 +486,7 @@ defmodule FA3TP.IntegrationTest do
 
     chain_opts = [
       chain_length: chain_length,
-      causal: causal,
-      call_target_name: target,
-      platforms: [:cuda]
+      causal: causal
     ]
 
     forward_chain = fn q, k, v ->
@@ -552,7 +540,6 @@ defmodule FA3TP.IntegrationTest do
          precision,
          type,
          {batch, seqlen, q_heads, kv_heads, dim},
-         target,
          causal,
          mesh,
          input_shardings,
@@ -568,9 +555,7 @@ defmodule FA3TP.IntegrationTest do
 
     chain_opts = [
       chain_length: chain_length,
-      causal: causal,
-      call_target_name: target,
-      platforms: [:cuda]
+      causal: causal
     ]
 
     forward_chain = fn q, k, v ->

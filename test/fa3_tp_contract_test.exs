@@ -1,11 +1,34 @@
 defmodule FA3TP.ContractTest do
   use ExUnit.Case, async: true
 
+  import Nx.Defn.Kernel, only: [custom_grad: 3]
+
+  alias FlashAttention3.FFI
+  alias FlashAttention3.HostTestBlock
+
   defp fixtures do
     q = Nx.iota({1, 8, 8, 4}, type: {:f, 32}) |> Nx.divide(100)
     k = Nx.iota({1, 8, 2, 4}, type: {:f, 32}) |> Nx.subtract(13) |> Nx.divide(80)
     v = Nx.iota({1, 8, 2, 4}, type: {:f, 32}) |> Nx.subtract(7) |> Nx.divide(40)
     {q, k, v}
+  end
+
+  test "FFI result packing preserves the Nx fallback surface" do
+    {q, k, v} = fixtures()
+    doutput = Nx.iota(q.shape, type: {:f, 32}) |> Nx.remainder(17) |> Nx.divide(19)
+
+    assert {output, lse} = FA3TP.forward(q, k, v, causal: true)
+    assert {expected_output, expected_lse} = FA3TP.reference(q, k, v, causal: true)
+    assert_all_close(output, expected_output, atol: 1.0e-6, rtol: 1.0e-6)
+    assert_all_close(lse, expected_lse, atol: 1.0e-6, rtol: 1.0e-6)
+
+    actual_gradients = FA3TP.backward(q, k, v, output, lse, doutput, causal: true)
+    expected_gradients = FA3TP.reference_backward(q, k, v, doutput, causal: true)
+
+    Enum.zip(Tuple.to_list(actual_gradients), Tuple.to_list(expected_gradients))
+    |> Enum.each(fn {actual, expected} ->
+      assert_all_close(actual, expected, atol: 1.0e-5, rtol: 1.0e-5)
+    end)
   end
 
   test "GQA head sharding reconstructs the unsharded attention result" do
@@ -53,22 +76,15 @@ defmodule FA3TP.ContractTest do
   end
 
   test "the real Nx.block path emits the FA3 layouts and GQA sharding rule" do
-    {q, k, v} = fixtures()
-    q = Nx.as_type(q, {:bf, 16})
-    k = Nx.as_type(k, {:bf, 16})
-    v = Nx.as_type(v, {:bf, 16})
+    q = Nx.broadcast(Nx.tensor(0.1, type: {:bf, 16}), {1, 8, 8, 128})
+    k = Nx.broadcast(Nx.tensor(0.2, type: {:bf, 16}), {1, 8, 2, 128})
+    v = Nx.broadcast(Nx.tensor(0.3, type: {:bf, 16}), {1, 8, 2, 128})
 
-    fun = fn q, k, v ->
-      FA3TP.forward(q, k, v,
-        causal: true,
-        call_target_name: "exla_test_fa3_forward",
-        platforms: [:host]
-      )
-    end
+    fun = &host_forward(&1, &2, &3, true)
 
     %{mlir_module: mlir} = EXLA.to_mlir_module(fun, [q, k, v], client: :host)
 
-    assert mlir =~ "stablehlo.custom_call @exla_test_fa3_forward"
+    assert mlir =~ "stablehlo.custom_call @exla_fa3_forward"
     assert mlir =~ "operand_layouts = [dense<[3, 2, 1, 0]>"
     assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
     assert mlir =~ "sdy.sharding_rule = #sdy.op_sharding_rule<"
@@ -84,13 +100,7 @@ defmodule FA3TP.ContractTest do
 
     fun = fn q, k, v, doutput ->
       Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        {output, _lse} =
-          FA3TP.forward(q, k, v,
-            causal: true,
-            call_target_name: "exla_test_fa3_forward",
-            backward_call_target_name: "exla_test_fa3_backward",
-            platforms: [:host]
-          )
+        {output, _lse} = host_forward(q, k, v, true)
 
         output |> Nx.multiply(doutput) |> Nx.sum()
       end)
@@ -99,8 +109,8 @@ defmodule FA3TP.ContractTest do
     %{mlir_module: mlir} =
       EXLA.to_mlir_module(fun, [q, k, v, doutput], client: :host)
 
-    assert mlir =~ "stablehlo.custom_call @exla_test_fa3_forward"
-    assert mlir =~ "stablehlo.custom_call @exla_test_fa3_backward"
+    assert mlir =~ "stablehlo.custom_call @exla_fa3_forward"
+    assert mlir =~ "stablehlo.custom_call @exla_fa3_backward"
     assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
   end
 
@@ -110,18 +120,17 @@ defmodule FA3TP.ContractTest do
     v = Nx.broadcast(Nx.tensor(0.3, type: {:bf, 16}), {1, 8, 2, 128})
     doutput = Nx.broadcast(Nx.tensor(0.4, type: {:bf, 16}), q.shape)
 
-    opts = [
-      chain_length: 2,
-      causal: true,
-      call_target_name: "exla_test_fa3_forward",
-      backward_call_target_name: "exla_test_fa3_backward",
-      platforms: [:host]
-    ]
-
-    forward = fn q, k, v -> FA3TP.Benchmark.forward_chain(q, k, v, opts) end
+    forward = fn q, k, v ->
+      {output, _lse} = host_forward(q, k, v, true)
+      {output, _lse} = host_forward(output, k, v, true)
+      output
+    end
 
     forward_backward = fn q, k, v, doutput ->
-      FA3TP.Benchmark.forward_backward_chain(q, k, v, doutput, opts)
+      Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
+        output = forward.(q, k, v)
+        output |> Nx.multiply(doutput) |> Nx.sum()
+      end)
     end
 
     %{mlir_module: forward_mlir} =
@@ -130,13 +139,13 @@ defmodule FA3TP.ContractTest do
     %{mlir_module: backward_mlir} =
       EXLA.to_mlir_module(forward_backward, [q, k, v, doutput], client: :host)
 
-    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_test_fa3_forward/, forward_mlir)) ==
+    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_fa3_forward/, forward_mlir)) ==
              2
 
-    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_test_fa3_forward/, backward_mlir)) ==
+    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_fa3_forward/, backward_mlir)) ==
              2
 
-    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_test_fa3_backward/, backward_mlir)) ==
+    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_fa3_backward/, backward_mlir)) ==
              2
   end
 
@@ -155,6 +164,54 @@ defmodule FA3TP.ContractTest do
 
     second = fun.(Enum.map(first, &[&1]))
     assert Enum.map(second, &Nx.to_flat_list/1) == [[3, 4], [5, 6]]
+  end
+
+  defp host_forward(q, k, v, causal) do
+    {_batch, _sequence, _heads, head_dim} = q.shape
+    softmax_scale = 1.0 / :math.sqrt(head_dim)
+    ffi = FFI.forward(q, k, v, causal, softmax_scale)
+    block = %HostTestBlock{spec: ffi.spec}
+
+    native_results =
+      Nx.block(block, ffi.operands, ffi.outputs, fn _block, q, k, v ->
+        {output, lse} =
+          FA3TP.reference(q, k, v, causal: causal, softmax_scale: softmax_scale)
+
+        FFI.pack_results(ffi, {output, lse})
+      end)
+
+    result = {output, lse} = FFI.semantic_results(ffi, native_results)
+
+    case q.data do
+      %Nx.Defn.Expr{} ->
+        custom_grad(result, [q, k, v], fn {doutput, _dlse} ->
+          doutput = Nx.as_type(doutput, q.type)
+
+          host_backward(q, k, v, output, lse, doutput, causal, softmax_scale)
+          |> Tuple.to_list()
+        end)
+
+      _ ->
+        result
+    end
+  end
+
+  defp host_backward(q, k, v, output, lse, doutput, causal, softmax_scale) do
+    ffi = FFI.backward(q, k, v, output, lse, doutput, causal, softmax_scale)
+    block = %HostTestBlock{spec: ffi.spec}
+
+    native_results =
+      Nx.block(block, ffi.operands, ffi.outputs, fn _block, q, k, v, _output, _lse, doutput ->
+        {dq, dk, dv} =
+          FA3TP.reference_backward(q, k, v, doutput,
+            causal: causal,
+            softmax_scale: softmax_scale
+          )
+
+        FFI.pack_results(ffi, {dq, dk, dv})
+      end)
+
+    FFI.semantic_results(ffi, native_results)
   end
 
   defp assert_all_close(left, right, opts) do

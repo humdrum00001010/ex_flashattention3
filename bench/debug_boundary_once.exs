@@ -18,9 +18,7 @@ v = Nx.broadcast(Nx.tensor(0.03, type: {:bf, 16}), {1, 256, 4, 256})
 
 opts = [
   chain_length: chain_length,
-  causal: true,
-  call_target_name: "exla_fa3_forward",
-  platforms: [:cuda]
+  causal: true
 ]
 
 forward = fn q, k, v -> FA3TP.Benchmark.forward_chain(q, k, v, opts) end

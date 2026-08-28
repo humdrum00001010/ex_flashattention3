@@ -177,6 +177,36 @@ defmodule FlashAttention3.FFI do
     }
   end
 
+  @doc false
+  def pack_results(
+        %__MODULE__{outputs: outputs, semantic_result_count: count},
+        semantic_results
+      )
+      when is_tuple(semantic_results) and tuple_size(semantic_results) == count do
+    workspaces =
+      outputs
+      |> Tuple.to_list()
+      |> Enum.drop(count)
+      |> Enum.map(&zero_template/1)
+
+    semantic_results
+    |> Tuple.to_list()
+    |> Kernel.++(workspaces)
+    |> List.to_tuple()
+  end
+
+  @doc false
+  def semantic_results(
+        %__MODULE__{outputs: outputs, semantic_result_count: count},
+        native_results
+      )
+      when is_tuple(native_results) and tuple_size(native_results) == tuple_size(outputs) do
+    native_results
+    |> Tuple.to_list()
+    |> Enum.take(count)
+    |> List.to_tuple()
+  end
+
   defp qkv_shape!(q, k, v, causal) do
     {batch, seqlen_q, q_heads, head_dim} = rank4_shape!(q, "q")
     {^batch, seqlen_k, kv_heads, ^head_dim} = rank4_shape!(k, "k")
@@ -221,4 +251,8 @@ defmodule FlashAttention3.FFI do
   end
 
   defp round_up(value, block), do: div(value + block - 1, block) * block
+
+  defp zero_template(%Nx.Tensor{shape: shape, type: type}) do
+    Nx.broadcast(Nx.tensor(0, type: type), shape)
+  end
 end

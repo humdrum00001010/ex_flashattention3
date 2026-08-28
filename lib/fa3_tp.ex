@@ -1,26 +1,8 @@
 defmodule FA3TP.Block do
   @moduledoc false
 
-  @enforce_keys [
-    :call_target_name,
-    :backward_call_target_name,
-    :causal,
-    :softmax_scale
-  ]
-  defstruct [
-    :call_target_name,
-    :backward_call_target_name,
-    :causal,
-    :softmax_scale,
-    platforms: [:cuda]
-  ]
-end
-
-defmodule FA3TP.BackwardBlock do
-  @moduledoc false
-
-  @enforce_keys [:call_target_name, :causal, :softmax_scale]
-  defstruct [:call_target_name, :causal, :softmax_scale, platforms: [:cuda]]
+  @enforce_keys [:platform, :spec, :causal, :softmax_scale]
+  defstruct [:platform, :spec, :causal, :softmax_scale]
 end
 
 defmodule FA3TP do
@@ -34,19 +16,18 @@ defmodule FA3TP do
 
   import Nx.Defn.Kernel, only: [custom_grad: 3]
 
+  alias FlashAttention3.FFI
+
   def forward(q, k, v, opts \\ []) do
     opts =
       Keyword.validate!(opts,
         causal: false,
-        softmax_scale: nil,
-        call_target_name: "exla_fa3_forward",
-        backward_call_target_name: "exla_fa3_backward",
-        platforms: [:cuda]
+        softmax_scale: nil
       )
 
     {batch, seqlen_q, q_heads, head_dim} = rank4_shape!(q, "q")
     {^batch, seqlen_k, kv_heads, ^head_dim} = rank4_shape!(k, "k")
-    {^batch, ^seqlen_k, ^kv_heads, value_dim} = rank4_shape!(v, "v")
+    {^batch, ^seqlen_k, ^kv_heads, _value_dim} = rank4_shape!(v, "v")
 
     unless q.type == k.type and q.type == v.type do
       raise ArgumentError,
@@ -67,28 +48,24 @@ defmodule FA3TP do
     end
 
     softmax_scale = Keyword.get(opts, :softmax_scale) || 1.0 / :math.sqrt(head_dim)
+    ffi = FFI.forward(q, k, v, causal, softmax_scale)
 
     block = %FA3TP.Block{
-      call_target_name: Keyword.fetch!(opts, :call_target_name),
-      backward_call_target_name: Keyword.fetch!(opts, :backward_call_target_name),
+      platform: ffi.platform,
+      spec: ffi.spec,
       causal: causal,
-      softmax_scale: softmax_scale,
-      platforms: Keyword.fetch!(opts, :platforms)
+      softmax_scale: softmax_scale
     }
 
-    output = Nx.template({batch, seqlen_q, q_heads, value_dim}, q.type)
-    lse = Nx.template({batch, q_heads, seqlen_q}, {:f, 32})
-    scheduler_workspace = Nx.template({batch}, {:s, 32})
-
-    {forward_output, forward_lse, _scheduler_workspace} =
-      Nx.block(block, [q, k, v], {output, lse, scheduler_workspace}, fn block, q, k, v ->
+    native_results =
+      Nx.block(block, ffi.operands, ffi.outputs, fn block, q, k, v ->
         {output, lse} =
           reference(q, k, v, causal: block.causal, softmax_scale: block.softmax_scale)
 
-        {output, lse, Nx.broadcast(Nx.tensor(0, type: {:s, 32}), {batch})}
+        FFI.pack_results(ffi, {output, lse})
       end)
 
-    result = {forward_output, forward_lse}
+    result = {forward_output, forward_lse} = FFI.semantic_results(ffi, native_results)
 
     case q.data do
       %Nx.Defn.Expr{} ->
@@ -102,9 +79,7 @@ defmodule FA3TP do
           {dq, dk, dv} =
             backward(q, k, v, forward_output, forward_lse, doutput,
               causal: block.causal,
-              softmax_scale: block.softmax_scale,
-              call_target_name: block.backward_call_target_name,
-              platforms: block.platforms
+              softmax_scale: block.softmax_scale
             )
 
           [dq, dk, dv]
@@ -119,67 +94,38 @@ defmodule FA3TP do
     opts =
       Keyword.validate!(opts,
         causal: false,
-        softmax_scale: nil,
-        call_target_name: "exla_fa3_backward",
-        platforms: [:cuda]
+        softmax_scale: nil
       )
 
-    {batch, seqlen_q, q_heads, head_dim} = rank4_shape!(q, "q")
-    {^batch, seqlen_k, kv_heads, ^head_dim} = rank4_shape!(k, "k")
+    {_batch, _seqlen_q, _q_heads, head_dim} = rank4_shape!(q, "q")
+    rank4_shape!(k, "k")
     rank4_shape!(v, "v")
     rank4_shape!(output, "output")
     rank4_shape!(doutput, "doutput")
 
-    block = %FA3TP.BackwardBlock{
-      call_target_name: Keyword.fetch!(opts, :call_target_name),
-      causal: Keyword.fetch!(opts, :causal),
-      softmax_scale: Keyword.get(opts, :softmax_scale) || 1.0 / :math.sqrt(head_dim),
-      platforms: Keyword.fetch!(opts, :platforms)
+    causal = Keyword.fetch!(opts, :causal)
+    softmax_scale = Keyword.get(opts, :softmax_scale) || 1.0 / :math.sqrt(head_dim)
+    ffi = FFI.backward(q, k, v, output, lse, doutput, causal, softmax_scale)
+
+    block = %FA3TP.Block{
+      platform: ffi.platform,
+      spec: ffi.spec,
+      causal: causal,
+      softmax_scale: softmax_scale
     }
 
-    k_block_m = if head_dim <= 128, do: if(block.causal, do: 64, else: 80), else: 64
-    k_block_n = if head_dim <= 128, do: 128, else: 80
-    seqlen_q_rounded = round_up(seqlen_q, k_block_m)
-    seqlen_k_rounded = round_up(seqlen_k, k_block_n)
-    q_blocks = div(seqlen_q_rounded, k_block_m)
-
-    softmax_shape = {batch, q_heads, seqlen_q_rounded}
-    dq_accum_shape = {batch, q_heads, seqlen_q_rounded, head_dim}
-    dq_semaphore_shape = {q_blocks, batch, q_heads}
-    dk_accum_shape = {batch, kv_heads, seqlen_k_rounded, head_dim}
-
-    outputs = {
-      Nx.template(q.shape, q.type),
-      Nx.template(k.shape, k.type),
-      Nx.template(v.shape, v.type),
-      Nx.template(softmax_shape, {:f, 32}),
-      Nx.template(softmax_shape, {:f, 32}),
-      Nx.template(dq_accum_shape, {:f, 32}),
-      Nx.template(dq_semaphore_shape, {:s, 32}),
-      Nx.template(dk_accum_shape, {:f, 32}),
-      Nx.template(dk_accum_shape, {:f, 32})
-    }
-
-    {dq, dk, dv, _softmax_d, _lse_log2, _dq_accum, _dq_semaphore, _dk_accum, _dv_accum} =
-      Nx.block(block, [q, k, v, output, lse, doutput], outputs, fn block,
-                                                                   q,
-                                                                   k,
-                                                                   v,
-                                                                   _output,
-                                                                   _lse,
-                                                                   doutput ->
+    native_results =
+      Nx.block(block, ffi.operands, ffi.outputs, fn block, q, k, v, _output, _lse, doutput ->
         {dq, dk, dv} =
           reference_backward(q, k, v, doutput,
             causal: block.causal,
             softmax_scale: block.softmax_scale
           )
 
-        {dq, dk, dv, zero(softmax_shape, {:f, 32}), zero(softmax_shape, {:f, 32}),
-         zero(dq_accum_shape, {:f, 32}), zero(dq_semaphore_shape, {:s, 32}),
-         zero(dk_accum_shape, {:f, 32}), zero(dk_accum_shape, {:f, 32})}
+        FFI.pack_results(ffi, {dq, dk, dv})
       end)
 
-    {dq, dk, dv}
+    FFI.semantic_results(ffi, native_results)
   end
 
   def reference(q, k, v, opts \\ []) do
@@ -331,71 +277,6 @@ defmodule FA3TP do
     {Nx.concatenate(output_shards, axis: 2), Nx.concatenate(lse_shards, axis: 1)}
   end
 
-  def operation_attributes(q, k, v) do
-    {batch, seqlen_q, q_heads, head_dim} = rank4_shape!(q, "q")
-    {^batch, seqlen_k, kv_heads, ^head_dim} = rank4_shape!(k, "k")
-    {^batch, ^seqlen_k, ^kv_heads, value_dim} = rank4_shape!(v, "v")
-    groups = div(q_heads, kv_heads)
-
-    sharding_rule =
-      "#sdy.op_sharding_rule<" <>
-        "([i, j, lm, n], [i, k, m, n], [i, k, m, o])->" <>
-        "([i, j, lm, o], [i, lm, j], [i]) " <>
-        "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
-        "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}} " <>
-        "need_replication={i, j, k, l, n, o}, custom>"
-
-    [
-      {"operand_layouts",
-       "[dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
-         "dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
-         "dense<[3, 2, 1, 0]> : tensor<4xindex>]"},
-      {"result_layouts",
-       "[dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
-         "dense<[2, 1, 0]> : tensor<3xindex>, " <>
-         "dense<[0]> : tensor<1xindex>]"},
-      {"sdy.sharding_rule", sharding_rule}
-    ]
-  end
-
-  def backward_operation_attributes(q, k, v, causal) do
-    {batch, seqlen_q, q_heads, head_dim} = rank4_shape!(q, "q")
-    {^batch, seqlen_k, kv_heads, ^head_dim} = rank4_shape!(k, "k")
-    {^batch, ^seqlen_k, ^kv_heads, value_dim} = rank4_shape!(v, "v")
-    groups = div(q_heads, kv_heads)
-    k_block_m = if head_dim <= 128, do: if(causal, do: 64, else: 80), else: 64
-    k_block_n = if head_dim <= 128, do: 128, else: 80
-    seqlen_q_rounded = round_up(seqlen_q, k_block_m)
-    seqlen_k_rounded = round_up(seqlen_k, k_block_n)
-    q_blocks = div(seqlen_q_rounded, k_block_m)
-
-    sharding_rule =
-      "#sdy.op_sharding_rule<" <>
-        "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
-        "[i, j, lm, o], [i, lm, j], [i, j, lm, o])->" <>
-        "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
-        "[i, lm, p], [i, lm, p], [i, lm, p, n], [r, i, lm], " <>
-        "[i, m, q, n], [i, m, q, o]) " <>
-        "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
-        "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}, " <>
-        "p=#{seqlen_q_rounded}, q=#{seqlen_k_rounded}, r=#{q_blocks}} " <>
-        "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
-
-    row_major_4d = "dense<[3, 2, 1, 0]> : tensor<4xindex>"
-    row_major_3d = "dense<[2, 1, 0]> : tensor<3xindex>"
-
-    [
-      {"operand_layouts",
-       "[#{row_major_4d}, #{row_major_4d}, #{row_major_4d}, " <>
-         "#{row_major_4d}, #{row_major_3d}, #{row_major_4d}]"},
-      {"result_layouts",
-       "[#{row_major_4d}, #{row_major_4d}, #{row_major_4d}, " <>
-         "#{row_major_3d}, #{row_major_3d}, #{row_major_4d}, " <>
-         "#{row_major_3d}, #{row_major_4d}, #{row_major_4d}]"},
-      {"sdy.sharding_rule", sharding_rule}
-    ]
-  end
-
   defp repeat_kv_heads(tensor, 1), do: tensor
 
   defp repeat_kv_heads(tensor, groups) do
@@ -436,68 +317,16 @@ defmodule FA3TP do
     raise ArgumentError,
           "#{name} must have shape {batch, sequence, heads, dim}, got #{inspect(shape)}"
   end
-
-  defp round_up(value, block), do: div(value + block - 1, block) * block
-
-  defp zero(shape, type), do: Nx.broadcast(Nx.tensor(0, type: type), shape)
 end
 
 defimpl EXLA.CustomCall, for: FA3TP.Block do
-  alias EXLA.CustomCall.Spec
-
-  def call(block, _out, [q, k, v], %{platform: platform}) do
-    target = precision_target(block.call_target_name, q.type)
-
-    if platform in block.platforms and target do
-      attributes = [
-        {"causal", to_string(block.causal)},
-        {"softmax_scale", "#{block.softmax_scale} : f32"}
-      ]
-
-      {:ok,
-       %Spec{
-         call_target_name: target,
-         attributes: attributes,
-         operation_attributes: FA3TP.operation_attributes(q, k, v)
-       }}
+  def call(block, _out, _inputs, %{platform: platform}) do
+    if platform == block.platform and block.spec do
+      {:ok, block.spec}
     else
       :skip
     end
   end
 
   def call(_, _, _, _), do: :skip
-
-  defp precision_target(base, {:bf, 16}), do: base
-  defp precision_target(base, {:f, 16}), do: base <> "_f16"
-  defp precision_target(_base, _type), do: nil
-end
-
-defimpl EXLA.CustomCall, for: FA3TP.BackwardBlock do
-  alias EXLA.CustomCall.Spec
-
-  def call(block, _out, [q, k, v, _output, _lse, _doutput], %{platform: platform}) do
-    target = precision_target(block.call_target_name, q.type)
-
-    if platform in block.platforms and target do
-      attributes = [
-        {"causal", to_string(block.causal)},
-        {"softmax_scale", "#{block.softmax_scale} : f32"}
-      ]
-
-      {:ok,
-       %Spec{
-         call_target_name: target,
-         attributes: attributes,
-         operation_attributes: FA3TP.backward_operation_attributes(q, k, v, block.causal)
-       }}
-    else
-      :skip
-    end
-  end
-
-  def call(_, _, _, _), do: :skip
-
-  defp precision_target(base, {:bf, 16}), do: base
-  defp precision_target(base, {:f, 16}), do: base <> "_f16"
-  defp precision_target(_base, _type), do: nil
 end
