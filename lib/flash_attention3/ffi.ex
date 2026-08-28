@@ -38,7 +38,7 @@ defmodule FlashAttention3.FFI do
       qkv_shape!(q, k, v, causal)
 
     spec =
-      if native_supported?(q.type, head_dim, value_dim) do
+      if custom_call_dtype?(q.type) do
         groups = div(q_heads, kv_heads)
 
         sharding_rule =
@@ -123,7 +123,7 @@ defmodule FlashAttention3.FFI do
     q_blocks = div(seqlen_q_rounded, k_block_m)
 
     spec =
-      if native_supported?(q.type, head_dim, value_dim) do
+      if custom_call_dtype?(q.type) do
         groups = div(q_heads, kv_heads)
 
         sharding_rule =
@@ -204,9 +204,7 @@ defmodule FlashAttention3.FFI do
     ]
   end
 
-  defp native_supported?(type, head_dim, value_dim) do
-    type in [{:bf, 16}, {:f, 16}] and head_dim in [128, 256] and value_dim == head_dim
-  end
+  defp custom_call_dtype?(type), do: type in [{:bf, 16}, {:f, 16}]
 
   defp precision_target!(base, {:bf, 16}), do: base
   defp precision_target!(base, {:f, 16}), do: base <> "_f16"

@@ -148,4 +148,13 @@ defmodule FlashAttention3.FFITest do
 
     assert tuple_size(backward_outputs) == 9
   end
+
+  test "supported dtypes preserve native validation for unsupported shapes" do
+    q = Nx.template({1, 8, 8, 64}, {:bf, 16})
+    k = Nx.template({1, 8, 2, 64}, {:bf, 16})
+    v = Nx.template({1, 8, 2, 64}, {:bf, 16})
+
+    assert %FFI{spec: %Spec{call_target_name: "exla_fa3_forward"}} =
+             FFI.forward(q, k, v, true, 0.125)
+  end
 end
