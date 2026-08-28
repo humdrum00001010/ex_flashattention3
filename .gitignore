@@ -1,0 +1,13 @@
+/_build/
+/deps/
+/artifacts/
+/build/
+/.env
+/.env.*
+/erl_crash.dump
+*.cubin
+*.nsys-rep
+*.o
+*.so
+*.sqlite
+*.sqlite-journal

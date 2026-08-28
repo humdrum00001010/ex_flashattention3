@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export FA3_TP_BENCHMARK=1
+export FA3_TP_BATCH="${FA3_TP_BATCH:-4}"
+export FA3_TP_SEQLEN="${FA3_TP_SEQLEN:-2048}"
+export FA3_TP_Q_HEADS="${FA3_TP_Q_HEADS:-24}"
+export FA3_TP_KV_HEADS="${FA3_TP_KV_HEADS:-4}"
+export FA3_TP_HEAD_DIM="${FA3_TP_HEAD_DIM:-256}"
+export FA3_TP_CHAIN_LENGTH="${FA3_TP_CHAIN_LENGTH:-64}"
+export FA3_TP_WARMUP="${FA3_TP_WARMUP:-3}"
+export FA3_TP_ITERATIONS="${FA3_TP_ITERATIONS:-10}"
+export FA3_TP_CALLS_PER_SAMPLE="${FA3_TP_CALLS_PER_SAMPLE:-1}"
+
+cd /opt/fa3-tp/fa3_tp_experiment
+
+hlo_dir="${FA3_TP_HLO_DIR:-$(mktemp -d /tmp/fa3-hlo-benchmark.XXXXXX)}"
+mkdir -p "$hlo_dir"
+
+export FA3_TP_HLO_DIR="$hlo_dir"
+export FA3_TP_DYLIB="${FA3_TP_DYLIB:-/opt/fa3-tp/artifacts/libfa3_xla.so}"
+export XLA_FLAGS="--xla_gpu_enable_command_buffer=+CUSTOM_CALL --xla_dump_to=$hlo_dir --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout|command-buffer ${XLA_FLAGS_EXTRA:-}"
+
+exec mix test test/fa3_tp_integration_test.exs --include integration
