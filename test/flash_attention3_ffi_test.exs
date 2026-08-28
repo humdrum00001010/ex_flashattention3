@@ -129,4 +129,23 @@ defmodule FlashAttention3.FFITest do
                0.125
              )
   end
+
+  test "non-native tensors retain the fallback result contract" do
+    q = Nx.template({1, 8, 8, 4}, {:f, 32})
+    k = Nx.template({1, 8, 2, 4}, {:f, 32})
+    v = Nx.template({1, 8, 2, 4}, {:f, 32})
+
+    assert %FFI{spec: nil, outputs: forward_outputs, semantic_result_count: 2} =
+             FFI.forward(q, k, v, true, 0.5)
+
+    assert tuple_size(forward_outputs) == 3
+
+    output = Nx.template(q.shape, q.type)
+    lse = Nx.template({1, 8, 8}, {:f, 32})
+
+    assert %FFI{spec: nil, outputs: backward_outputs, semantic_result_count: 3} =
+             FFI.backward(q, k, v, output, lse, output, true, 0.5)
+
+    assert tuple_size(backward_outputs) == 9
+  end
 end

@@ -16,7 +16,7 @@ defmodule FlashAttention3.FFI do
   @type t :: %__MODULE__{
           platform: :cuda,
           operands: [Nx.Tensor.t()],
-          spec: Spec.t(),
+          spec: Spec.t() | nil,
           outputs: tuple(),
           semantic_result_count: pos_integer()
         }
@@ -37,27 +37,30 @@ defmodule FlashAttention3.FFI do
     {batch, seqlen_q, q_heads, head_dim, seqlen_k, kv_heads, value_dim} =
       qkv_shape!(q, k, v, causal)
 
-    groups = div(q_heads, kv_heads)
+    spec =
+      if native_supported?(q.type, head_dim, value_dim) do
+        groups = div(q_heads, kv_heads)
 
-    sharding_rule =
-      "#sdy.op_sharding_rule<" <>
-        "([i, j, lm, n], [i, k, m, n], [i, k, m, o])->" <>
-        "([i, j, lm, o], [i, lm, j], [i]) " <>
-        "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
-        "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}} " <>
-        "need_replication={i, j, k, l, n, o}, custom>"
+        sharding_rule =
+          "#sdy.op_sharding_rule<" <>
+            "([i, j, lm, n], [i, k, m, n], [i, k, m, o])->" <>
+            "([i, j, lm, o], [i, lm, j], [i]) " <>
+            "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
+            "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}} " <>
+            "need_replication={i, j, k, l, n, o}, custom>"
 
-    spec = %Spec{
-      call_target_name: precision_target!(@forward_target, q.type),
-      attributes: handler_attributes(causal, softmax_scale),
-      operation_attributes: [
-        {"operand_layouts", "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}]"},
-        {"result_layouts",
-         "[#{@row_major_4d}, dense<[2, 1, 0]> : tensor<3xindex>, " <>
-           "dense<[0]> : tensor<1xindex>]"},
-        {"sdy.sharding_rule", sharding_rule}
-      ]
-    }
+        %Spec{
+          call_target_name: precision_target!(@forward_target, q.type),
+          attributes: handler_attributes(causal, softmax_scale),
+          operation_attributes: [
+            {"operand_layouts", "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}]"},
+            {"result_layouts",
+             "[#{@row_major_4d}, dense<[2, 1, 0]> : tensor<3xindex>, " <>
+               "dense<[0]> : tensor<1xindex>]"},
+            {"sdy.sharding_rule", sharding_rule}
+          ]
+        }
+      end
 
     outputs = {
       Nx.template({batch, seqlen_q, q_heads, value_dim}, q.type),
@@ -113,39 +116,43 @@ defmodule FlashAttention3.FFI do
             "FA3 backward FFI requires O/dO to match the output and FP32 LSE in BHQ order"
     end
 
-    groups = div(q_heads, kv_heads)
     k_block_m = if head_dim <= 128, do: if(causal, do: 64, else: 80), else: 64
     k_block_n = if head_dim <= 128, do: 128, else: 80
     seqlen_q_rounded = round_up(seqlen_q, k_block_m)
     seqlen_k_rounded = round_up(seqlen_k, k_block_n)
     q_blocks = div(seqlen_q_rounded, k_block_m)
 
-    sharding_rule =
-      "#sdy.op_sharding_rule<" <>
-        "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
-        "[i, j, lm, o], [i, lm, j], [i, j, lm, o])->" <>
-        "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
-        "[i, lm, p], [i, lm, p], [i, lm, p, n], [r, i, lm], " <>
-        "[i, m, q, n], [i, m, q, o]) " <>
-        "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
-        "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}, " <>
-        "p=#{seqlen_q_rounded}, q=#{seqlen_k_rounded}, r=#{q_blocks}} " <>
-        "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
+    spec =
+      if native_supported?(q.type, head_dim, value_dim) do
+        groups = div(q_heads, kv_heads)
 
-    spec = %Spec{
-      call_target_name: precision_target!(@backward_target, q.type),
-      attributes: handler_attributes(causal, softmax_scale),
-      operation_attributes: [
-        {"operand_layouts",
-         "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}, " <>
-           "#{@row_major_4d}, #{@row_major_3d}, #{@row_major_4d}]"},
-        {"result_layouts",
-         "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}, " <>
-           "#{@row_major_3d}, #{@row_major_3d}, #{@row_major_4d}, " <>
-           "#{@row_major_3d}, #{@row_major_4d}, #{@row_major_4d}]"},
-        {"sdy.sharding_rule", sharding_rule}
-      ]
-    }
+        sharding_rule =
+          "#sdy.op_sharding_rule<" <>
+            "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
+            "[i, j, lm, o], [i, lm, j], [i, j, lm, o])->" <>
+            "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
+            "[i, lm, p], [i, lm, p], [i, lm, p, n], [r, i, lm], " <>
+            "[i, m, q, n], [i, m, q, o]) " <>
+            "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
+            "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}, " <>
+            "p=#{seqlen_q_rounded}, q=#{seqlen_k_rounded}, r=#{q_blocks}} " <>
+            "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
+
+        %Spec{
+          call_target_name: precision_target!(@backward_target, q.type),
+          attributes: handler_attributes(causal, softmax_scale),
+          operation_attributes: [
+            {"operand_layouts",
+             "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}, " <>
+               "#{@row_major_4d}, #{@row_major_3d}, #{@row_major_4d}]"},
+            {"result_layouts",
+             "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}, " <>
+               "#{@row_major_3d}, #{@row_major_3d}, #{@row_major_4d}, " <>
+               "#{@row_major_3d}, #{@row_major_4d}, #{@row_major_4d}]"},
+            {"sdy.sharding_rule", sharding_rule}
+          ]
+        }
+      end
 
     softmax_shape = {batch, q_heads, seqlen_q_rounded}
 
@@ -179,14 +186,6 @@ defmodule FlashAttention3.FFI do
       raise ArgumentError, "FA3 FFI requires Q, K, and V to use one dtype"
     end
 
-    unless head_dim in [128, 256] do
-      raise ArgumentError, "FA3 FFI supports head dimensions 128 and 256"
-    end
-
-    unless value_dim == head_dim do
-      raise ArgumentError, "FA3 FFI requires equal QK and V head dimensions"
-    end
-
     unless rem(q_heads, kv_heads) == 0 do
       raise ArgumentError, "FA3 FFI requires complete GQA groups"
     end
@@ -203,6 +202,10 @@ defmodule FlashAttention3.FFI do
       {"causal", to_string(causal)},
       {"softmax_scale", "#{softmax_scale} : f32"}
     ]
+  end
+
+  defp native_supported?(type, head_dim, value_dim) do
+    type in [{:bf, 16}, {:f, 16}] and head_dim in [128, 256] and value_dim == head_dim
   end
 
   defp precision_target!(base, {:bf, 16}), do: base
