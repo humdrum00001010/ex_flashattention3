@@ -1,12 +1,17 @@
 # 2xH100 results
 
-Run: 2026-08-28, 2x NVIDIA H100 80GB HBM3 SXM, NV18, CUDA 13.0,
+Fresh-image rerun: 2026-08-28, 2x NVIDIA H100 80GB HBM3 SXM, NV18, CUDA 13.0,
 cuDNN 9.12, XLA 0.10.0, Elixir 1.20.2, OTP 29.0.2.
 
 ## Correctness
 
-- GPU integration: passed single-GPU and TP2 BF16/FP16 forward, backward,
-  sharding, all-reduce placement, and resident-buffer re-entry.
+- With the operation-attributes candidate alone, single-GPU and TP2 BF16/FP16
+  forward/backward, sharding, and all-reduce placement passed. Resident-buffer
+  re-entry then failed because a sharded executable has device ID `-1` while
+  its resident buffers have physical device IDs `0` and `1`.
+- With the separate EXLA sharded-buffer re-entry patch, the full GPU integration
+  gate passed without host staging. That patch is not part of the
+  operation-attributes change.
 - CPU preflight: 6 passed, 2 GPU tests excluded.
 
 ## Forward and backward throughput
@@ -14,27 +19,48 @@ cuDNN 9.12, XLA 0.10.0, Elixir 1.20.2, OTP 29.0.2.
 Shape: causal `{batch=4, sequence=2048, q_heads=24, kv_heads=4, dim=256}`.
 Chain length: 64. `Forward+backward` uses `3 * forward FLOPs`.
 
-| Precision | Operation | 1 GPU PFLOP/s | TP2 PFLOP/s | TP2 range | Scaling |
-| --- | --- | ---: | ---: | ---: | ---: |
-| BF16 | Forward | 0.70761 | 1.37640 | 1.36585-1.37726 | 1.945x |
-| BF16 | Forward+backward | 0.33970 | 0.65972 | 0.65571-0.66322 | 1.942x |
-| FP16 | Forward | 0.65509 | 1.28723 | 1.28360-1.36840 | 1.965x |
-| FP16 | Forward+backward | 0.33922 | 0.65446 | 0.65304-0.65714 | 1.929x |
+| Precision | Operation | 1 GPU PFLOP/s | TP2 PFLOP/s (range) | Scaling |
+| --- | --- | ---: | ---: | ---: |
+| BF16 | Forward | 0.71013 | 1.37167 (1.33706-1.39267) | 1.932x |
+| BF16 | Forward+backward | 0.34011 | 0.65769 (0.65539-0.65940) | 1.934x |
+| FP16 | Forward | 0.67875 | 1.27962 (1.27062-1.32992) | 1.885x |
+| FP16 | Forward+backward | 0.33967 | 0.65293 (0.64428-0.65551) | 1.922x |
 
 Ranges are slow-to-fast throughput from the timing p90 and p10 samples.
 
-## 99% BF16 forward result
+## BF16 forward saturation
 
 Target: 1.42 PFLOP/s. The 99% gate is 1.4058 PFLOP/s.
 
-| Calls per executable | TP2 PFLOP/s | Range | Target fraction |
+| Calls per executable | Samples | TP2 PFLOP/s (range) | Target fraction |
 | ---: | ---: | ---: | ---: |
-| 1 | 0.38752 | 0.36042-0.41564 | 27.290% |
-| 64 | 1.37640 | 1.36585-1.37726 | 96.929% |
-| 256 | 1.40670 | 1.40058-1.40794 | 99.063% |
-| 512 | **1.41490** | 1.41035-1.41606 | **99.641%** |
+| 64 | 10 | 1.37167 (1.33706-1.39267) | 96.597% |
+| 512 | 20 | 1.40401 (1.40212-1.40612) | 98.874% |
+| 512 | 50 | 1.40032 (1.39637-1.40492) | 98.614% |
 
-The chain-512 slow-side sample is 1.41035 PFLOP/s, or 99.320%.
+The fresh-instance median did not reach the 99% gate. An earlier same-shape
+run reached 1.41490 PFLOP/s, but the two fresh-image repetitions above are the
+current reproducibility result.
+
+## Bottleneck attribution
+
+- A node-level Nsight Systems capture measured four rank-local FA3 kernels at
+  145.024-147.297 us. For the global TP2 workload this is a kernel-only
+  equivalent of 1.400-1.422 PFLOP/s; the median is 1.412 PFLOP/s.
+- Each causal call also records a 4-byte scheduler-semaphore memset. Its device
+  duration was 0.768-0.800 us, less than 0.6% of a steady call.
+- Comparing chain 64 and 512 gives an approximately 0.23-0.25 ms fixed outer
+  execution boundary. At chain 512 that is only 0.4-0.5 us per FA3 call.
+- The final graph contains one command buffer, so the FFI handler and PjRt
+  launch are not repeated 512 times during replay.
+- Under sustained load the GPUs ran mainly at 1815-1845 MHz despite a reported
+  1980 MHz maximum. The container could not lock application clocks.
+
+The observed steady-state bottleneck is therefore the native FA3 kernel path,
+not the `Nx.block`, custom-call, FFI, or PjRt boundary. The scheduler memset and
+lower sustained clock are measured adjacent contributors, not independently
+proven root causes. Backward was validated and benchmarked, but this
+counter-level attribution covers forward only.
 
 ## Proof
 
@@ -50,16 +76,17 @@ The chain-512 slow-side sample is 1.41035 PFLOP/s, or 99.320%.
 ## Reproducibility
 
 - Nx: `37901d749105076e2882fdea89a6e18393eecc0f`
+- operation-attributes candidate: `9f26fac0006c4e61094990f25ed53d209469aab8`
+- image: `expropriation/nx-exla@sha256:14d7e2930922adaa4d74152c3cfaf24d905c4bc750c0e929dfa5250fcda903e2`
 - FA3: `0251105a2fb19d2957484b7f023cd8c115286ced`
 - CUTLASS: `7127592069c2fe01b041e174ba4345ef9b279671`
-- `libfa3_xla.so`: `16c2b4f57b462eb66a4e207ad5a440b491d8bc768fdf6c9f2e087850dc28d599`
-- HLO before optimization: `8d5dcc15e8406661656ba2914280811fc06aa1e0d4bf9043349c2eccb5b400e5`
-- HLO after optimization: `3731d049d39383128fa4dff23a4b7bc9505e08872f4c745bdebbe4edb25daa60`
-- Final thunk sequence: `f90c0d359a5f48b319e53e598b0662dc17eef1563632fb00d3e4deec7c73587f`
+- `libfa3_xla.so`: `36a28ab83fdf2438c6528905f00224ce2744b9783913274adfe887d71ba391de`
+- Nsight Systems: 2025.3.0
 
 ## Limits
 
-- The 99.641% result is BF16 causal D256 with 512 calls in one command buffer.
-- Chain-1 reaches 0.38752 PFLOP/s because it pays the boundary once per call.
+- The latest BF16 causal D256 chain-512 medians are 98.61-98.87% of the target.
 - PFLOP/s counts useful attention work, not all hardware instructions.
+- Forward has kernel-level attribution; backward does not yet have an Nsight
+  Compute counter breakdown.
 - FP8 backward is unsupported.

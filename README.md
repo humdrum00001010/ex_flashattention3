@@ -75,7 +75,7 @@ BEAM initializes, and the test rejects stale dumps.
 ```sh
 export FA3_TP_DYLIB=/absolute/path/to/libfa3_xla.so
 export FA3_TP_HLO_DIR=/absolute/path/to/new-empty-hlo-dir
-export XLA_FLAGS="--xla_dump_to=$FA3_TP_HLO_DIR --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout"
+export XLA_FLAGS="--xla_gpu_enable_command_buffer=+CUSTOM_CALL --xla_dump_to=$FA3_TP_HLO_DIR --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout"
 
 mix test test/fa3_tp_integration_test.exs --include integration
 ```
@@ -95,16 +95,27 @@ The gate requires, in order:
 Default shape: causal `{4, 2048, 24, 4, 256}`. Throughput includes device
 completion and one PjRt boundary per compiled chain.
 
-| Precision | Operation | 1 GPU PFLOP/s | TP2 PFLOP/s | TP2 scaling |
+| Precision | Operation | 1 GPU PFLOP/s | TP2 PFLOP/s (range) | TP2 scaling |
 | --- | --- | ---: | ---: | ---: |
-| BF16 | Forward | 0.70761 | 1.37640 | 1.945x |
-| BF16 | Forward+backward | 0.33970 | 0.65972 | 1.942x |
-| FP16 | Forward | 0.65509 | 1.28723 | 1.965x |
-| FP16 | Forward+backward | 0.33922 | 0.65446 | 1.929x |
+| BF16 | Forward | 0.71013 | 1.37167 (1.33706-1.39267) | 1.932x |
+| BF16 | Forward+backward | 0.34011 | 0.65769 (0.65539-0.65940) | 1.934x |
+| FP16 | Forward | 0.67875 | 1.27962 (1.27062-1.32992) | 1.885x |
+| FP16 | Forward+backward | 0.33967 | 0.65293 (0.64428-0.65551) | 1.922x |
 
-BF16 TP2 forward reached **1.41490 PFLOP/s**, or **99.641%** of the
-1.42 PFLOP/s target, at chain 512. The slow-side sample was 1.41035 PFLOP/s
-(99.320%).
+These are the fresh-image chain-64 medians; ranges are slow-to-fast throughput
+from the timing p90 and p10 samples. BF16 TP2 forward at chain 512 measured
+1.40401 PFLOP/s over 20 samples and 1.40032 PFLOP/s over a 50-sample repeat,
+or 98.87% and 98.61% of the 1.42 PFLOP/s target. An earlier 1.41490 PFLOP/s
+run was not reproduced on the fresh instance.
+
+The chain-512 HLO contains 512 FA3 calls and lowers to one command buffer with
+512 custom-call thunks. A short Nsight trace placed the kernel-only equivalent
+throughput at 1.400-1.422 PFLOP/s; the amortized EXLA/PjRt boundary is therefore
+not the steady-state bottleneck. See [RESULTS.md](RESULTS.md) for the breakdown.
+
+The resident-input benchmark needs EXLA's sharded-buffer re-entry behavior in
+addition to `EXLA.CustomCall.Spec.operation_attributes`. They are independent
+changes; the operation-attributes change alone does not fix buffer placement.
 
 Run the full forward/backward benchmark:
 
@@ -113,7 +124,7 @@ FA3_TP_BENCHMARK=1 \
 mix test test/fa3_tp_integration_test.exs --include integration
 ```
 
-Run the 99% probe:
+Run the BF16 saturation probe:
 
 ```sh
 FA3_TP_BENCHMARK=1 FA3_TP_PRECISION=bf16 FA3_TP_FORWARD_ONLY=1 \
