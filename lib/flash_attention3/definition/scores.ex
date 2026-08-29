@@ -1,4 +1,4 @@
-defmodule FlashAttention3.Definition.Softmax do
+defmodule FlashAttention3.Definition.Scores do
   @moduledoc false
 
   @doc """
@@ -7,29 +7,10 @@ defmodule FlashAttention3.Definition.Softmax do
   This is the `{batch, heads, seqlen_q, seqlen_k}` allocation the kernel exists
   to avoid, and the reason this definition is not a viable implementation.
   """
-  def scores(q_bhqd, k_bhkd, softmax_scale, causal, seqlen_q, seqlen_k) do
+  def masked(q_bhqd, k_bhkd, softmax_scale, causal, seqlen_q, seqlen_k) do
     Nx.dot(q_bhqd, [3], [0, 1], k_bhkd, [3], [0, 1])
     |> Nx.multiply(softmax_scale)
     |> mask(causal, seqlen_q, seqlen_k)
-  end
-
-  @doc """
-  Row-stable softmax, returning the probabilities and the parts of the
-  normalizer the log-sum-exp is built from.
-  """
-  def normalize(scores) do
-    row_max = Nx.reduce_max(scores, axes: [3], keep_axes: true)
-    exponentials = Nx.exp(Nx.subtract(scores, row_max))
-    denominator = Nx.sum(exponentials, axes: [3], keep_axes: true)
-
-    {Nx.divide(exponentials, denominator), row_max, denominator}
-  end
-
-  @doc """
-  The log-sum-exp normalizer, squeezed to `{batch, heads, seqlen_q}`.
-  """
-  def log_sum_exp(row_max, denominator) do
-    denominator |> Nx.log() |> Nx.add(row_max) |> Nx.squeeze(axes: [3])
   end
 
   defp mask(scores, false, _seqlen_q, _seqlen_k), do: scores

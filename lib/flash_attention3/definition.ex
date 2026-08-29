@@ -14,7 +14,7 @@ defmodule FlashAttention3.Definition do
   fallback.
   """
 
-  alias FlashAttention3.Definition.{Gqa, Softmax}
+  alias FlashAttention3.Definition.{Gqa, Scores}
 
   @doc """
   Attention over BSHD tensors, returning `{output, lse}`.
@@ -29,16 +29,18 @@ defmodule FlashAttention3.Definition do
     {q_bhqd, k_bhkd, v_bhkd} = to_bhsd(q, k, v, dims.groups, type)
 
     scores =
-      Softmax.scores(q_bhqd, k_bhkd, softmax_scale, causal, dims.seqlen_q, dims.seqlen_k)
+      Scores.masked(q_bhqd, k_bhkd, softmax_scale, causal, dims.seqlen_q, dims.seqlen_k)
 
-    {probabilities, row_max, denominator} = Softmax.normalize(scores)
+    lse = Nx.logsumexp(scores, axes: [3], keep_axes: true)
 
     output =
-      Nx.dot(probabilities, [3], [0, 1], v_bhkd, [2], [0, 1])
+      scores
+      |> probabilities(lse)
+      |> Nx.dot([3], [0, 1], v_bhkd, [2], [0, 1])
       |> Nx.transpose(axes: [0, 2, 1, 3])
       |> Nx.as_type(q.type)
 
-    {output, Softmax.log_sum_exp(row_max, denominator)}
+    {output, Nx.squeeze(lse, axes: [3])}
   end
 
   @doc """
@@ -54,9 +56,9 @@ defmodule FlashAttention3.Definition do
     do_bhqd = doutput |> Nx.as_type({:f, 32}) |> Nx.transpose(axes: [0, 2, 1, 3])
 
     scores =
-      Softmax.scores(q_bhqd, k_bhkd, softmax_scale, causal, dims.seqlen_q, dims.seqlen_k)
+      Scores.masked(q_bhqd, k_bhkd, softmax_scale, causal, dims.seqlen_q, dims.seqlen_k)
 
-    {probabilities, _row_max, _denominator} = Softmax.normalize(scores)
+    probabilities = probabilities(scores, Nx.logsumexp(scores, axes: [3], keep_axes: true))
 
     dprobabilities = Nx.dot(do_bhqd, [3], [0, 1], v_bhkd, [3], [0, 1])
 
@@ -89,6 +91,10 @@ defmodule FlashAttention3.Definition do
 
     {dq, dk, dv}
   end
+
+  # The identity FA3's backward relies on: recovering the probabilities from
+  # the scores and the normalizer, rather than storing them.
+  defp probabilities(scores, lse), do: Nx.exp(Nx.subtract(scores, lse))
 
   defp to_bhsd(q, k, v, groups, type) do
     {
