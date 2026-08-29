@@ -1,15 +1,14 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
-  Native results are the operation's results followed by workspace.
-  This module widens the default to that shape and narrows it back.
-  Workspace crosses the boundary because XLA has no handler scratch.
+  The boundary between an Nx block and the FA3 handler ABI.
+  Nx sees the results; the handler sees those plus workspace.
+  This module maps between them: pad going in, drop coming out.
+  Workspace crosses because XLA has no handler scratch.
   It is declared, not allocated: command buffers fix addresses early.
-  The block tuple size must equal the custom call result count.
-  That count must equal the length of `result_layouts`.
+  Block tuple size equals result count equals `result_layouts` length.
   `Nx.Defn.Expr.block/4` sizes the block from the default's return.
   It ignores the output template, so the default must be padded.
-  A mismatch emits a call whose layouts disagree with its results.
-  MLIR then fails to verify it.
+  Breaking that equality fails MLIR verification.
   Buffers are named for their parameters in `native/fa3_xla.cc`.
   """
 
