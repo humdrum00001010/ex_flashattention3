@@ -68,34 +68,19 @@ defmodule FlashAttention3 do
 
   # Attaches the FA3 backward as the gradient of the output.
   #
-  # This has to wrap the block from outside, which is not where Nx puts it.
-  # `Nx.LinAlg.qr/2` calls `custom_grad/3` inside the block's default, so grad
-  # re-applies that default and derives from it. The custom call still lowers,
-  # but the gradient recomputes the forward through Nx to get the values it
-  # differentiates: 13 lines of MLIR for the loss alone, 194 for
-  # `value_and_grad`.
+  # This has to wrap the block from outside. Differentiating a block re-applies
+  # its default implementation, so the closure grad invokes is a fresh one
+  # closing over freshly built dense expressions, not the closure written here.
+  # Placed inside the default, the backward call's O and LSE operands would come
+  # from that dense attention rather than from the kernel.
   #
-  # FA3 cannot pay that. Its backward is a custom call taking O and LSE as
-  # operands, and `parents_args(:block, ...)` re-applies the default callback
-  # during grad, building a fresh custom_grad node whose closure captures the
-  # freshly built dense expressions. The closure grad invokes is not the one
-  # written here.
+  # Measured under `value_and_grad`, same shapes, only the placement differing:
+  # outside is one forward call, one backward call and no dot_general; inside is
+  # one forward call, one backward call and four dot_generals, computing
+  # attention twice.
   #
-  # So the backward call still fires, but its operands come from a score-matrix
-  # attention rather than from the kernel. Measured under `value_and_grad` on
-  # the same shapes, differing only in placement: outside is one forward call,
-  # one backward call, no dot_general. Inside is one forward call, one backward
-  # call and four dot_generals -- attention computed twice, once by the kernel
-  # for the value and once densely for the gradient's operands.
-  #
-  # It has to wrap the block from outside. The closure captures `output` and
-  # `lse`, and those become operands of the backward call, so they must be the
-  # ones the custom call produces. Moved inside the default callback it would
-  # capture the dense expressions instead, and XLA would have to materialize a
-  # full dense forward just to feed backward.
-  #
-  # `custom_grad/3` and `stop_grad/1` annotate expressions, so an eager call
-  # has nothing to annotate and passes through.
+  # `custom_grad/3` and `stop_grad/1` annotate expressions, so an eager call has
+  # nothing to annotate and passes through.
   defp attach_grad({output, lse}, %{data: %Nx.Defn.Expr{}} = q, k, v, causal, softmax_scale) do
     graded =
       custom_grad(output, [q, k, v], fn doutput ->
