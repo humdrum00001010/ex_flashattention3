@@ -1,20 +1,19 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
-  Owns the complete native result contract for the FA3 custom calls.
+  Owns the native result contract for the FA3 custom calls.
 
   The kernel returns compiler-owned workspaces alongside its semantic results.
-  Those workspaces exist only because a captured CUDA command buffer needs
-  stable buffers, so they are packed and dropped here and never reach the
-  operation. Model code uses `FlashAttention3` instead of this module.
+  Those exist only because a captured CUDA command buffer needs stable buffers,
+  so they are declared here, dropped here, and never reach the operation.
   """
 
-  alias FlashAttention3.{Block, Reference, Shape}
+  alias FlashAttention3.{Block, Definition}
 
   @doc """
   Runs the forward custom call and returns `{output, lse}`.
   """
   def forward(q, k, v, causal, softmax_scale, block \\ Block.Forward) do
-    dims = Shape.attention!(q, k, v, causal)
+    dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
 
     results = [
       Nx.template({dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}, q.type),
@@ -25,18 +24,18 @@ defmodule FlashAttention3.FFI do
     block
     |> struct!(causal: causal, softmax_scale: softmax_scale)
     |> Nx.block([q, k, v], List.to_tuple(results), fn block, q, k, v ->
-      pack(Reference.attention(q, k, v, options(block)), results, 2)
+      Definition.attention(q, k, v, options(block))
     end)
-    |> unpack(2)
+    |> semantic(2)
   end
 
   @doc """
   Runs the backward custom call and returns `{dq, dk, dv}`.
   """
   def backward(q, k, v, output, lse, doutput, causal, softmax_scale, block \\ Block.Backward) do
-    dims = Shape.attention!(q, k, v, causal)
-    Shape.backward!(dims, output, lse, doutput, q.type)
-    workspace = Shape.workspace(dims, causal)
+    dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
+    FlashAttention3.Kernel.backward_operands!(dims, output, lse, doutput, q.type)
+    workspace = FlashAttention3.Kernel.workspace(dims, causal)
 
     softmax = Nx.template({dims.batch, dims.q_heads, workspace.seqlen_q_rounded}, {:f, 32})
 
@@ -67,22 +66,14 @@ defmodule FlashAttention3.FFI do
       [q, k, v, output, lse, doutput],
       List.to_tuple(results),
       fn block, q, k, v, _output, _lse, doutput ->
-        pack(Reference.backward(q, k, v, doutput, options(block)), results, 3)
+        Definition.backward(q, k, v, doutput, options(block))
       end
     )
-    |> unpack(3)
+    |> semantic(3)
   end
 
   defp options(block), do: block |> Map.from_struct() |> Map.to_list()
 
-  defp pack(semantic, results, count) do
-    workspaces =
-      for template <- Enum.drop(results, count),
-          do: Nx.broadcast(Nx.tensor(0, type: template.type), template.shape)
-
-    (Tuple.to_list(semantic) ++ workspaces) |> List.to_tuple()
-  end
-
-  defp unpack(native, count),
+  defp semantic(native, count),
     do: native |> Tuple.to_list() |> Enum.take(count) |> List.to_tuple()
 end

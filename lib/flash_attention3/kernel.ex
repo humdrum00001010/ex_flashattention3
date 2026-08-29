@@ -1,0 +1,244 @@
+defmodule FlashAttention3.Kernel do
+  @moduledoc """
+  What the FA3 Hopper kernel accepts, and how it is described to XLA.
+
+  This is the whole ABI in one place: which handler runs for a dtype, what
+  shapes the kernel admits, how its buffers are laid out, and which dimension
+  it can be partitioned over. It mirrors `native/fa3_xla.cc` and nothing here
+  changes without a matching change there.
+  """
+
+  alias EXLA.CustomCall.Spec
+
+  @head_dims [128, 256]
+
+  # Shardy dimension variables, shared by both directions:
+  #
+  #   i batch      j seqlen_q   k seqlen_k   lm q_heads (l groups x m kv_heads)
+  #   n head_dim   o value_dim
+  #
+  # Backward adds the rounded workspace extents:
+  #
+  #   p seqlen_q_rounded   q seqlen_k_rounded   r q_blocks
+  #
+  # A mapping's length is its buffer's rank, so the layout constraints are
+  # derived from these rather than repeated alongside them.
+
+  @forward %{
+    targets: %{{:bf, 16} => "fa3_forward_bf16", {:f, 16} => "fa3_forward_f16"},
+    operands: [[:i, :j, :lm, :n], [:i, :k, :m, :n], [:i, :k, :m, :o]],
+    results: [[:i, :j, :lm, :o], [:i, :lm, :j], [:i]],
+    replicate: [:i, :j, :k, :l, :n, :o]
+  }
+
+  @backward %{
+    targets: %{{:bf, 16} => "fa3_backward_bf16", {:f, 16} => "fa3_backward_f16"},
+    operands: [
+      [:i, :j, :lm, :n],
+      [:i, :k, :m, :n],
+      [:i, :k, :m, :o],
+      [:i, :j, :lm, :o],
+      [:i, :lm, :j],
+      [:i, :j, :lm, :o]
+    ],
+    results: [
+      [:i, :j, :lm, :n],
+      [:i, :k, :m, :n],
+      [:i, :k, :m, :o],
+      [:i, :lm, :p],
+      [:i, :lm, :p],
+      [:i, :lm, :p, :n],
+      [:r, :i, :lm],
+      [:i, :m, :q, :n],
+      [:i, :m, :q, :o]
+    ],
+    replicate: [:i, :j, :k, :l, :n, :o, :p, :q, :r]
+  }
+
+  @doc """
+  Validates Q, K, and V against the kernel and returns their named dimensions.
+  """
+  def dims!(q, k, v, causal) do
+    {batch, seqlen_q, q_heads, head_dim} = rank4!(q, "q")
+    {k_batch, seqlen_k, kv_heads, k_head_dim} = rank4!(k, "k")
+    {v_batch, v_seqlen_k, v_kv_heads, value_dim} = rank4!(v, "v")
+
+    unless k_batch == batch and v_batch == batch do
+      raise ArgumentError,
+            "FA3 requires one batch size across q, k, and v, got #{batch}, " <>
+              "#{k_batch}, and #{v_batch}"
+    end
+
+    unless k_head_dim == head_dim do
+      raise ArgumentError,
+            "FA3 requires k to have q's head dimension, got #{k_head_dim} and #{head_dim}"
+    end
+
+    unless v_seqlen_k == seqlen_k and v_kv_heads == kv_heads do
+      raise ArgumentError,
+            "FA3 requires v to match k's sequence length and head count, got " <>
+              "{#{v_seqlen_k}, #{v_kv_heads}} and {#{seqlen_k}, #{kv_heads}}"
+    end
+
+    unless q.type == k.type and q.type == v.type do
+      raise ArgumentError,
+            "FA3 requires q, k, and v to have one dtype, got #{inspect(q.type)}, " <>
+              "#{inspect(k.type)}, and #{inspect(v.type)}"
+    end
+
+    unless Map.has_key?(@forward.targets, q.type) do
+      raise ArgumentError, "FA3 supports BF16 and FP16, got: #{inspect(q.type)}"
+    end
+
+    unless head_dim in @head_dims do
+      raise ArgumentError,
+            "FA3 supports head dimensions #{inspect(@head_dims)}, got: #{head_dim}"
+    end
+
+    unless rem(q_heads, kv_heads) == 0 do
+      raise ArgumentError,
+            "FA3 GQA requires q_heads to be divisible by kv_heads, got #{q_heads} " <>
+              "and #{kv_heads}"
+    end
+
+    if causal and seqlen_q != seqlen_k do
+      raise ArgumentError,
+            "causal FA3 requires equal q/k sequence lengths, got #{seqlen_q} and #{seqlen_k}"
+    end
+
+    %{
+      batch: batch,
+      seqlen_q: seqlen_q,
+      seqlen_k: seqlen_k,
+      q_heads: q_heads,
+      kv_heads: kv_heads,
+      groups: div(q_heads, kv_heads),
+      head_dim: head_dim,
+      value_dim: value_dim
+    }
+  end
+
+  @doc """
+  Returns true when the kernel can run this dtype and head dimension.
+  """
+  def supported?(type, head_dim),
+    do: Map.has_key?(@forward.targets, type) and head_dim in @head_dims
+
+  @doc """
+  Asserts that the backward operands match the forward result contract.
+  """
+  def backward_operands!(dims, output, lse, doutput, type) do
+    output_shape = {dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}
+
+    unless output.shape == output_shape and output.type == type and
+             lse.shape == {dims.batch, dims.q_heads, dims.seqlen_q} and lse.type == {:f, 32} and
+             doutput.shape == output_shape and doutput.type == type do
+      raise ArgumentError,
+            "FA3 backward requires O/dO to match the output and FP32 LSE in BHQ order"
+    end
+
+    :ok
+  end
+
+  @doc """
+  Returns the rounded extents that size the backward workspaces.
+
+  This mirrors the tile selection in the FA3 backward kernel. The workspaces
+  are compiler-owned results rather than handler-side scratch so that they stay
+  capturable in a CUDA command buffer, which is why their geometry has to be
+  known here.
+  """
+  def workspace(%{head_dim: head_dim, seqlen_q: seqlen_q, seqlen_k: seqlen_k}, causal) do
+    block_m = if head_dim <= 128, do: if(causal, do: 64, else: 80), else: 64
+    block_n = if head_dim <= 128, do: 128, else: 80
+    seqlen_q_rounded = round_up(seqlen_q, block_m)
+
+    %{
+      seqlen_q_rounded: seqlen_q_rounded,
+      seqlen_k_rounded: round_up(seqlen_k, block_n),
+      q_blocks: div(seqlen_q_rounded, block_m)
+    }
+  end
+
+  @doc """
+  Describes the forward call to XLA.
+  """
+  def forward([q, k, v], causal, softmax_scale) do
+    dims = dims!(q, k, v, causal)
+    spec(@forward, q.type, sizes(dims), causal, softmax_scale)
+  end
+
+  @doc """
+  Describes the backward call to XLA.
+
+  O, LSE, and dO introduce no new dimensions; their mappings are written in
+  terms of the forward variables. They are named so that the native call's
+  arity is stated once.
+  """
+  def backward([q, k, v, _output, _lse, _doutput], causal, softmax_scale) do
+    dims = dims!(q, k, v, causal)
+    workspace = workspace(dims, causal)
+
+    sizes =
+      sizes(dims) ++
+        [
+          p: workspace.seqlen_q_rounded,
+          q: workspace.seqlen_k_rounded,
+          r: workspace.q_blocks
+        ]
+
+    spec(@backward, q.type, sizes, causal, softmax_scale)
+  end
+
+  defp spec(call, type, sizes, causal, softmax_scale) do
+    %Spec{
+      call_target_name: Map.fetch!(call.targets, type),
+      attributes: [
+        {"causal", to_string(causal)},
+        {"softmax_scale", "#{softmax_scale} : f32"}
+      ],
+      operation_attributes: [
+        {"operand_layouts", layouts(call.operands)},
+        {"result_layouts", layouts(call.results)},
+        {"sdy.sharding_rule", sharding_rule(call, sizes)}
+      ]
+    }
+  end
+
+  defp layouts(mappings),
+    do: "[" <> Enum.map_join(mappings, ", ", &row_major(length(&1))) <> "]"
+
+  defp row_major(rank),
+    do: "dense<[#{Enum.join((rank - 1)..0//-1, ", ")}]> : tensor<#{rank}xindex>"
+
+  defp sharding_rule(call, sizes) do
+    "#sdy.op_sharding_rule<" <>
+      "(#{mappings(call.operands)})->(#{mappings(call.results)}) " <>
+      "{#{Enum.map_join(sizes, ", ", fn {dim, size} -> "#{dim}=#{size}" end)}} " <>
+      "need_replication={#{Enum.join(call.replicate, ", ")}}, custom>"
+  end
+
+  defp mappings(list),
+    do: Enum.map_join(list, ", ", &("[" <> Enum.join(&1, ", ") <> "]"))
+
+  defp sizes(dims) do
+    [
+      i: dims.batch,
+      j: dims.seqlen_q,
+      k: dims.seqlen_k,
+      l: dims.groups,
+      m: dims.kv_heads,
+      n: dims.head_dim,
+      o: dims.value_dim
+    ]
+  end
+
+  defp round_up(value, block), do: div(value + block - 1, block) * block
+
+  defp rank4!(%Nx.Tensor{shape: {a, b, c, d}}, _name), do: {a, b, c, d}
+
+  defp rank4!(%Nx.Tensor{shape: shape}, name) do
+    raise ArgumentError,
+          "#{name} must have shape {batch, sequence, heads, dim}, got #{inspect(shape)}"
+  end
+end

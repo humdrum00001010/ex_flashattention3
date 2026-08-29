@@ -1,31 +1,23 @@
-defmodule FlashAttention3.Reference do
+defmodule FlashAttention3.Definition do
   @moduledoc """
-  Attention written in plain Nx, with no kernel.
+  Attention written in plain Nx.
 
-  `Nx.block/4` requires a default implementation for every block, so this is
-  what the FA3 blocks are defined *as*: when no custom call is selected, this
-  is what EXLA compiles. It therefore serves three roles at once, and they are
-  the same code on purpose.
-
-    * the default callback for `Nx.block/4`, which the API requires
-    * what runs on any client that is not CUDA, which is what the CPU
-      preflight exercises
-    * the independent FP32 oracle the two-GPU correctness gate compares the
-      kernel against
+  `Nx.Defn.Expr.block/4` applies a block's default implementation on every
+  trace, before any backend decides whether to replace it, so `Nx.block/4`
+  cannot be used without one. Under `Nx.Defn.Evaluator` it is what actually
+  runs. It is therefore required by the API rather than chosen as a policy, and
+  it is not a fallback: `FlashAttention3.Block` raises instead of skipping on a
+  non-CUDA client, so EXLA never compiles this.
 
   It materializes the full `{batch, heads, seqlen_q, seqlen_k}` score matrix,
-  which is the allocation FlashAttention exists to avoid. So it defines the
-  operation correctly but is not an implementation you can fall back to at
-  model sequence lengths, and that asymmetry is why an unsupported dtype on
-  CUDA raises rather than landing here.
+  which is the allocation FlashAttention exists to avoid. That is exactly why
+  it is not reachable as a fallback.
   """
-
-  alias FlashAttention3.Shape
 
   def attention(q, k, v, opts \\ []) do
     opts = Keyword.validate!(opts, causal: false, softmax_scale: nil, upcast: true)
 
-    dims = Shape.attention!(q, k, v, Keyword.fetch!(opts, :causal))
+    dims = dims!(q, k, v)
     causal = Keyword.fetch!(opts, :causal)
     softmax_scale = Keyword.get(opts, :softmax_scale) || 1.0 / :math.sqrt(dims.head_dim)
 
@@ -66,8 +58,7 @@ defmodule FlashAttention3.Reference do
     opts = Keyword.validate!(opts, causal: false, softmax_scale: nil)
 
     causal = Keyword.fetch!(opts, :causal)
-    dims = Shape.attention!(q, k, v, causal)
-    Shape.rank4!(doutput, "doutput")
+    dims = dims!(q, k, v)
 
     softmax_scale = Keyword.get(opts, :softmax_scale) || 1.0 / :math.sqrt(dims.head_dim)
 
@@ -154,5 +145,22 @@ defmodule FlashAttention3.Reference do
       |> Nx.broadcast(scores.shape)
 
     Nx.select(allowed, scores, Nx.broadcast(-1.0e30, scores.shape))
+  end
+
+  defp dims!(q, k, v) do
+    {batch, seqlen_q, q_heads, _head_dim} = q.shape
+    {^batch, seqlen_k, kv_heads, value_dim} = v.shape
+    {^batch, ^seqlen_k, ^kv_heads, head_dim} = k.shape
+
+    %{
+      batch: batch,
+      seqlen_q: seqlen_q,
+      seqlen_k: seqlen_k,
+      q_heads: q_heads,
+      kv_heads: kv_heads,
+      groups: div(q_heads, kv_heads),
+      head_dim: head_dim,
+      value_dim: value_dim
+    }
   end
 end

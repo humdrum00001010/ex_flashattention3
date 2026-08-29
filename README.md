@@ -8,8 +8,7 @@ and Nsight evidence.
 
 The ownership chain is:
 
-1. `FlashAttention3.attention/4` presents the tensor operation and its
-   portable FP32 Nx definition.
+1. `FlashAttention3.attention/4` presents the tensor operation.
 2. `Nx.block/4` preserves that operation as a compiler-visible block.
 3. `EXLA.CustomCall` selects a precision-specific StableHLO custom call and
    attaches row-major layout constraints plus a Shardy rule.
@@ -41,12 +40,17 @@ attention output; `attention_with_lse/4` also returns the FP32 log-sum-exp for
 callers that merge partial results across key/value chunks. Backward runs
 through `Nx.Defn.grad/2` and needs no separate call.
 
-On a CUDA client the operation lowers to `fa3_forward_bf16`,
-`fa3_forward_f16`, `fa3_backward_bf16`, or `fa3_backward_f16`. An unsupported
-dtype or head dimension is a caller error there rather than a reason to fall
-back, because `FlashAttention3.Reference` materializes the full score matrix
-and is not viable at model sequence lengths. On any other client the operation
-falls back to that definition, which is what the CPU preflight exercises.
+This is a binding to the Hopper kernel, not an attention library. On a CUDA
+client the operation lowers to `fa3_forward_bf16`, `fa3_forward_f16`,
+`fa3_backward_bf16`, or `fa3_backward_f16`; on any other client it raises, and
+an unsupported dtype or head dimension is a caller error. There is deliberately
+no fallback: a score-matrix attention would silently change the memory
+complexity of the model that called it, which is the cost FlashAttention exists
+to avoid.
+
+`FlashAttention3.Definition` exists only because `Nx.block/4` applies a block's
+default implementation on every trace and cannot be used without one. The block
+raises rather than skipping, so EXLA never compiles it.
 
 ## Layout
 
@@ -88,9 +92,11 @@ installed. The native build is torch-free; it links the FA3/CUTLASS objects,
 
 ## CPU preflight
 
-CPU verifies the public fallback, analytic backward, StableHLO syntax,
-precision target selection, layouts, and Shardy attributes. It does not prove
-that a CUDA symbol loads or that TP executes on physical GPUs.
+CPU verifies StableHLO syntax, precision target selection, layouts, Shardy
+attributes, the head-parallel sharding policy, and the analytic backward of the
+Nx definition. Kernel numerics are not checked here and cannot be: there is no
+CPU path through FA3. It does not prove that a CUDA symbol loads or that TP
+executes on physical GPUs.
 
 ```sh
 mix format --check-formatted

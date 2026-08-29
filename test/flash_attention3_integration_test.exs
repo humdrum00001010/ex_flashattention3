@@ -1,4 +1,4 @@
-defmodule FA3TP.IntegrationTest do
+defmodule FlashAttention3.IntegrationTest do
   use ExUnit.Case, async: false
 
   @moduletag :integration
@@ -42,7 +42,7 @@ defmodule FA3TP.IntegrationTest do
     v = Nx.as_type(v_f32, {:bf, 16})
 
     forward = fn q, k, v ->
-      FA3TP.forward(q, k, v, causal: causal)
+      FlashAttention3.attention_with_lse(q, k, v, causal: causal)
     end
 
     # Gate 1: the native target itself must match an independent FP32 Nx oracle.
@@ -51,7 +51,7 @@ defmodule FA3TP.IntegrationTest do
 
     # Gate 2: TP receives complete KV groups, executes one local FA3 per rank,
     # and reconstructs the same global O/LSE without a collective inside FA3.
-    host_shards = FA3TP.shard_inputs(q, k, v, 2)
+    host_shards = FlashAttention3.TensorParallel.shard_inputs(q, k, v, 2)
 
     tp_forward =
       EXLA.shard_jit(forward, mesh,
@@ -62,7 +62,9 @@ defmodule FA3TP.IntegrationTest do
     sharded = tp_forward.(host_shards)
     assert Enum.map(sharded, fn {output, _lse} -> output.data.buffer.device_id end) == [0, 1]
 
-    assembled = sharded |> Enum.map(&to_host/1) |> FA3TP.assemble_outputs()
+    assembled =
+      sharded |> Enum.map(&to_host/1) |> FlashAttention3.TensorParallel.assemble_outputs()
+
     assert_matches_oracle!(assembled, {q_f32, k_f32, v_f32}, {q, k, v}, causal)
     audit_attention_hlo!(hlo_dir, target)
 
@@ -104,8 +106,11 @@ defmodule FA3TP.IntegrationTest do
     layer_results = tp_layer.(layer_args)
     assert Enum.map(layer_results, & &1.data.buffer.device_id) == [0, 1]
 
-    {expected_output, _expected_lse} = FA3TP.reference(q_f32, k_f32, v_f32, causal: causal)
-    {baseline_output, _baseline_lse} = FA3TP.reference(q, k, v, causal: causal)
+    {expected_output, _expected_lse} =
+      FlashAttention3.Definition.attention(q_f32, k_f32, v_f32, causal: causal)
+
+    {baseline_output, _baseline_lse} =
+      FlashAttention3.Definition.attention(q, k, v, causal: causal)
 
     expected_projection =
       expected_output
@@ -156,7 +161,9 @@ defmodule FA3TP.IntegrationTest do
           """)
       end
 
-    resident_assembled = resident_result |> Enum.map(&to_host/1) |> FA3TP.assemble_outputs()
+    resident_assembled =
+      resident_result |> Enum.map(&to_host/1) |> FlashAttention3.TensorParallel.assemble_outputs()
+
     assert_matches_oracle!(resident_assembled, {q_f32, k_f32, v_f32}, {q, k, v}, causal)
 
     if env_boolean("FA3_TP_BENCHMARK", false) do
@@ -282,14 +289,16 @@ defmodule FA3TP.IntegrationTest do
 
     reference_gradient = fn q, k, v, doutput ->
       Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        {output, _lse} = FA3TP.reference(q, k, v, causal: causal)
+        {output, _lse} = FlashAttention3.Definition.attention(q, k, v, causal: causal)
         output |> Nx.multiply(doutput) |> Nx.sum()
       end)
     end
 
     low_precision_gradient = fn q, k, v, doutput ->
       Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        {output, _lse} = FA3TP.reference(q, k, v, causal: causal, upcast: false)
+        {output, _lse} =
+          FlashAttention3.Definition.attention(q, k, v, causal: causal, upcast: false)
+
         output |> Nx.multiply(doutput) |> Nx.sum()
       end)
     end
@@ -305,7 +314,7 @@ defmodule FA3TP.IntegrationTest do
       doutput = Nx.as_type(doutput_f32, type)
 
       forward = fn q, k, v ->
-        FA3TP.forward(q, k, v, causal: causal)
+        FlashAttention3.attention_with_lse(q, k, v, causal: causal)
       end
 
       actual_forward = EXLA.jit(forward, client: :cuda).(q, k, v) |> to_host()
@@ -329,7 +338,7 @@ defmodule FA3TP.IntegrationTest do
 
       assert_gradient_tuple!(actual_gradients, expected_gradients, baseline_gradients)
 
-      qkv_shards = FA3TP.shard_inputs(q, k, v, 2)
+      qkv_shards = FlashAttention3.TensorParallel.shard_inputs(q, k, v, 2)
       q_heads_per_rank = div(elem(q.shape, 2), 2)
 
       gradient_args =
@@ -420,7 +429,8 @@ defmodule FA3TP.IntegrationTest do
              "#{2.0 * baseline_error + rounding_allowance + 1.0e-5}"
   end
 
-  defp apply_reference({q, k, v}, causal), do: FA3TP.reference(q, k, v, causal: causal)
+  defp apply_reference({q, k, v}, causal),
+    do: FlashAttention3.Definition.attention(q, k, v, causal: causal)
 
   defp map_tensors({left, right}, fun), do: {fun.(left), fun.(right)}
 
@@ -490,14 +500,14 @@ defmodule FA3TP.IntegrationTest do
     ]
 
     forward_chain = fn q, k, v ->
-      FA3TP.Benchmark.forward_chain(q, k, v, chain_opts)
+      FlashAttention3.Benchmark.forward_chain(q, k, v, chain_opts)
     end
 
     single_args =
       EXLA.jit(fn q, k, v -> {q, k, v} end, client: :cuda).(q, k, v)
       |> Tuple.to_list()
 
-    host_shards = FA3TP.shard_inputs(q, k, v, 2)
+    host_shards = FlashAttention3.TensorParallel.shard_inputs(q, k, v, 2)
 
     tp_args =
       EXLA.shard_jit(fn q, k, v -> {q, k, v} end, mesh,
@@ -559,11 +569,11 @@ defmodule FA3TP.IntegrationTest do
     ]
 
     forward_chain = fn q, k, v ->
-      FA3TP.Benchmark.forward_chain(q, k, v, chain_opts)
+      FlashAttention3.Benchmark.forward_chain(q, k, v, chain_opts)
     end
 
     forward_backward_chain = fn q, k, v, doutput ->
-      FA3TP.Benchmark.forward_backward_chain(q, k, v, doutput, chain_opts)
+      FlashAttention3.Benchmark.forward_backward_chain(q, k, v, doutput, chain_opts)
     end
 
     stage_single = EXLA.jit(fn q, k, v, doutput -> {q, k, v, doutput} end, client: :cuda)
@@ -572,7 +582,7 @@ defmodule FA3TP.IntegrationTest do
     single_forward = EXLA.jit(forward_chain, client: :cuda)
     single_forward_backward = EXLA.jit(forward_backward_chain, client: :cuda)
 
-    qkv_shards = FA3TP.shard_inputs(q, k, v, 2)
+    qkv_shards = FlashAttention3.TensorParallel.shard_inputs(q, k, v, 2)
     q_heads_per_rank = div(q_heads, 2)
 
     host_gradient_shards =

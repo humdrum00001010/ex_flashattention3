@@ -1,18 +1,22 @@
 defmodule FlashAttention3 do
   @moduledoc """
-  FlashAttention-3 for Nx, lowered to an XLA custom call on CUDA.
+  FlashAttention-3 for Nx, as an XLA custom call.
 
   `attention/4` is the operation. It takes BSHD `{batch, sequence, heads, dim}`
   tensors, is differentiable through `Nx.Defn.grad/2`, and is callable from
-  `defn`. On a CUDA client with a supported dtype and head dimension it lowers
-  to the native FA3 kernel; anywhere else it runs
-  `FlashAttention3.Reference`, which defines the same operation but
-  materializes the full score matrix.
+  `defn`.
 
-  Loading the native library is the application's job: the FFI targets are
-  registered by `libfa3_xla.so`'s static initializers, so the application must
-  load it into the OS process before compiling a computation that contains
-  them.
+  This is a binding to the Hopper kernel, not an attention library: there is no
+  portable implementation behind it. On a CUDA client with BF16 or FP16 and a
+  head dimension of 128 or 256 it lowers to the native kernel, and anywhere
+  else it raises. A score-matrix fallback would silently change the memory
+  complexity of the model that called it, which is the cost FlashAttention
+  exists to avoid.
+
+  Loading the native library is the application's job. The FFI targets and the
+  custom-call partitioner are registered by `libfa3_xla.so`'s static
+  initializers, so the application loads it into the OS process once, before
+  compiling anything that contains an FA3 call.
 
   ## Options
 
@@ -44,16 +48,11 @@ defmodule FlashAttention3 do
   deftransform attention_with_lse(q, k, v, opts \\ []) do
     opts = Keyword.validate!(opts, causal: false, softmax_scale: nil)
     causal = Keyword.fetch!(opts, :causal)
-    softmax_scale = Keyword.get(opts, :softmax_scale) || default_scale(q)
+    softmax_scale = Keyword.get(opts, :softmax_scale) || 1.0 / :math.sqrt(Nx.axis_size(q, 3))
 
     q
     |> FFI.forward(k, v, causal, softmax_scale)
     |> differentiate(q, k, v, causal, softmax_scale)
-  end
-
-  defp default_scale(q) do
-    {_batch, _sequence, _heads, head_dim} = FlashAttention3.Shape.rank4!(q, "q")
-    1.0 / :math.sqrt(head_dim)
   end
 
   defp differentiate({output, lse}, %{data: %Nx.Defn.Expr{}} = q, k, v, causal, softmax_scale) do
@@ -65,9 +64,7 @@ defmodule FlashAttention3 do
         # Q/K/V/O.
         doutput = Nx.as_type(doutput, q.type)
 
-        {dq, dk, dv} =
-          FFI.backward(q, k, v, output, lse, doutput, causal, softmax_scale)
-
+        {dq, dk, dv} = FFI.backward(q, k, v, output, lse, doutput, causal, softmax_scale)
         [dq, dk, dv]
       end)
 

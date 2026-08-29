@@ -1,120 +1,162 @@
 defmodule FlashAttention3Test do
   use ExUnit.Case, async: true
 
-  import Nx.Defn
+  import Nx.Defn.Kernel, only: [custom_grad: 3]
 
-  alias FlashAttention3.Reference
+  alias FlashAttention3.{FFI, HostTestBlock}
 
-  defp fixtures do
-    q = Nx.iota({1, 8, 8, 4}, type: {:f, 32}) |> Nx.divide(100)
-    k = Nx.iota({1, 8, 2, 4}, type: {:f, 32}) |> Nx.subtract(13) |> Nx.divide(80)
-    v = Nx.iota({1, 8, 2, 4}, type: {:f, 32}) |> Nx.subtract(7) |> Nx.divide(40)
-    {q, k, v}
+  defp bf16(shape), do: Nx.broadcast(Nx.tensor(0.1, type: {:bf, 16}), shape)
+
+  defp operands do
+    {bf16({1, 8, 8, 128}), bf16({1, 8, 2, 128}), bf16({1, 8, 2, 128})}
   end
 
-  defn wrapped(q, k, v) do
-    FlashAttention3.attention(q, k, v, causal: true)
-  end
+  describe "the operation refuses to run without the kernel" do
+    test "a host client has nothing to fall back to" do
+      {q, k, v} = operands()
 
-  defn wrapped_with_lse(q, k, v) do
-    FlashAttention3.attention_with_lse(q, k, v, causal: true)
-  end
-
-  test "attention returns the output alone and matches the definition" do
-    {q, k, v} = fixtures()
-
-    output = FlashAttention3.attention(q, k, v, causal: true)
-    {expected, _lse} = Reference.attention(q, k, v, causal: true)
-
-    assert output.shape == q.shape
-    assert_all_close(output, expected)
-  end
-
-  test "attention_with_lse also returns the FP32 normalizer in BHQ order" do
-    {q, k, v} = fixtures()
-
-    {output, lse} = FlashAttention3.attention_with_lse(q, k, v, causal: true)
-    {expected_output, expected_lse} = Reference.attention(q, k, v, causal: true)
-
-    assert lse.shape == {1, 8, 8}
-    assert lse.type == {:f, 32}
-    assert_all_close(output, expected_output)
-    assert_all_close(lse, expected_lse)
-  end
-
-  test "attention is callable from defn and differentiable" do
-    {q, k, v} = fixtures()
-    doutput = Nx.iota(q.shape, type: {:f, 32}) |> Nx.remainder(17) |> Nx.divide(19)
-
-    actual =
-      Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        wrapped(q, k, v) |> Nx.multiply(doutput) |> Nx.sum()
-      end)
-
-    expected = Reference.backward(q, k, v, doutput, causal: true)
-
-    Enum.zip(Tuple.to_list(actual), Tuple.to_list(expected))
-    |> Enum.each(fn {actual, expected} -> assert_all_close(actual, expected) end)
-  end
-
-  test "jit returns the lse alongside the output" do
-    {q, k, v} = fixtures()
-
-    {output, lse} = EXLA.jit(&wrapped_with_lse/3, client: :host).(q, k, v)
-    {expected_output, expected_lse} = Reference.attention(q, k, v, causal: true)
-
-    assert_all_close(output, expected_output)
-    assert_all_close(lse, expected_lse)
-  end
-
-  test "the lse is not differentiable but does not block the output gradient" do
-    {q, k, v} = fixtures()
-    doutput = Nx.iota(q.shape, type: {:f, 32}) |> Nx.remainder(17) |> Nx.divide(19)
-
-    gradient = fn q, k, v, doutput ->
-      Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        {output, _lse} = wrapped_with_lse(q, k, v)
-        output |> Nx.multiply(doutput) |> Nx.sum()
-      end)
+      assert_raise ArgumentError, ~r/requires a CUDA client, got: :host/, fn ->
+        EXLA.to_mlir_module(&FlashAttention3.attention(&1, &2, &3, causal: true), [q, k, v],
+          client: :host
+        )
+      end
     end
 
-    actual = EXLA.jit(gradient, client: :host).(q, k, v, doutput)
-    expected = Reference.backward(q, k, v, doutput, causal: true)
+    test "unknown options are rejected" do
+      {q, k, v} = operands()
 
-    Enum.zip(Tuple.to_list(actual), Tuple.to_list(expected))
-    |> Enum.each(fn {actual, expected} -> assert_all_close(actual, expected) end)
-  end
-
-  test "the production block skips on a host client and compiles the definition" do
-    q = Nx.broadcast(Nx.tensor(0.1, type: {:bf, 16}), {1, 8, 8, 128})
-    k = Nx.broadcast(Nx.tensor(0.2, type: {:bf, 16}), {1, 8, 2, 128})
-    v = Nx.broadcast(Nx.tensor(0.3, type: {:bf, 16}), {1, 8, 2, 128})
-
-    %{mlir_module: mlir} = EXLA.to_mlir_module(&wrapped/3, [q, k, v], client: :host)
-
-    refute mlir =~ "stablehlo.custom_call @fa3_forward"
-    assert mlir =~ "stablehlo.dot_general"
-  end
-
-  test "unsupported options are rejected" do
-    {q, k, v} = fixtures()
-
-    assert_raise ArgumentError, ~r/unknown keys \[:window_size\]/, fn ->
-      FlashAttention3.attention(q, k, v, window_size: 256)
-    end
-
-    short = &Nx.slice_along_axis(&1, 0, 4, axis: 1)
-
-    assert_raise ArgumentError, ~r/causal FA3 requires equal q\/k sequence lengths/, fn ->
-      FlashAttention3.attention(q, short.(k), short.(v), causal: true)
-    end
-
-    assert_raise ArgumentError, ~r/v to match k's sequence length and head count/, fn ->
-      FlashAttention3.attention(q, short.(k), v, causal: false)
+      assert_raise ArgumentError, ~r/unknown keys \[:window_size\]/, fn ->
+        FlashAttention3.attention(q, k, v, window_size: 256)
+      end
     end
   end
 
-  defp assert_all_close(left, right) do
-    assert Nx.to_number(Nx.all_close(left, right, atol: 1.0e-6, rtol: 1.0e-6)) == 1
+  describe "the kernel's limits are stated at the operation" do
+    test "dtype, head dimension, GQA, and causal lengths" do
+      f32 = &Nx.template(&1, {:f, 32})
+
+      assert_raise ArgumentError, ~r/supports BF16 and FP16/, fn ->
+        FFI.forward(f32.({1, 8, 8, 128}), f32.({1, 8, 2, 128}), f32.({1, 8, 2, 128}), true, 0.5)
+      end
+
+      assert_raise ArgumentError, ~r/supports head dimensions \[128, 256\]/, fn ->
+        FFI.forward(bf16({1, 8, 8, 64}), bf16({1, 8, 2, 64}), bf16({1, 8, 2, 64}), true, 0.125)
+      end
+
+      assert_raise ArgumentError, ~r/divisible by kv_heads/, fn ->
+        FFI.forward(bf16({1, 8, 7, 128}), bf16({1, 8, 2, 128}), bf16({1, 8, 2, 128}), true, 0.1)
+      end
+
+      assert_raise ArgumentError, ~r/causal FA3 requires equal q\/k sequence lengths/, fn ->
+        FFI.forward(bf16({1, 8, 8, 128}), bf16({1, 4, 2, 128}), bf16({1, 4, 2, 128}), true, 0.1)
+      end
+
+      assert_raise ArgumentError, ~r/v to match k's sequence length and head count/, fn ->
+        FFI.forward(bf16({1, 8, 8, 128}), bf16({1, 4, 2, 128}), bf16({1, 8, 2, 128}), false, 0.1)
+      end
+    end
+  end
+
+  describe "the emitted StableHLO" do
+    test "carries the FA3 layouts and GQA sharding rule" do
+      {q, k, v} = operands()
+
+      %{mlir_module: mlir} =
+        EXLA.to_mlir_module(&host_forward(&1, &2, &3, true), [q, k, v], client: :host)
+
+      assert calls(mlir, "fa3_forward_bf16") == 1
+      assert mlir =~ "operand_layouts = [dense<[3, 2, 1, 0]>"
+      assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
+      assert mlir =~ "sdy.sharding_rule = #sdy.op_sharding_rule<"
+      assert mlir =~ "[i, j, lm, n]"
+      assert mlir =~ "need_replication={i, j, k, l, n, o}, custom>"
+    end
+
+    test "gradient tracing emits the backward call" do
+      {q, k, v} = operands()
+      doutput = bf16({1, 8, 8, 128})
+
+      fun = fn q, k, v, doutput ->
+        Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
+          {output, _lse} = host_forward(q, k, v, true)
+          output |> Nx.multiply(doutput) |> Nx.sum()
+        end)
+      end
+
+      %{mlir_module: mlir} =
+        EXLA.to_mlir_module(fun, [q, k, v, doutput], client: :host)
+
+      assert calls(mlir, "fa3_forward_bf16") == 1
+      assert calls(mlir, "fa3_backward_bf16") == 1
+      assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
+    end
+
+    test "repeated calls stay inside one executable" do
+      {q, k, v} = operands()
+      doutput = bf16({1, 8, 8, 128})
+
+      forward = fn q, k, v ->
+        {output, _lse} = host_forward(q, k, v, true)
+        {output, _lse} = host_forward(output, k, v, true)
+        output
+      end
+
+      forward_backward = fn q, k, v, doutput ->
+        Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
+          forward.(q, k, v) |> Nx.multiply(doutput) |> Nx.sum()
+        end)
+      end
+
+      %{mlir_module: forward_mlir} = EXLA.to_mlir_module(forward, [q, k, v], client: :host)
+
+      %{mlir_module: backward_mlir} =
+        EXLA.to_mlir_module(forward_backward, [q, k, v, doutput], client: :host)
+
+      assert calls(forward_mlir, "fa3_forward_bf16") == 2
+      assert calls(backward_mlir, "fa3_forward_bf16") == 2
+      assert calls(backward_mlir, "fa3_backward_bf16") == 2
+    end
+  end
+
+  # MLIR may print the module in either the pretty or the generic form, so
+  # match the target name in both.
+  defp calls(mlir, target) do
+    pattern =
+      ~r/(?:custom_call @#{Regex.escape(target)}\b|call_target_name = "#{Regex.escape(target)}")/
+
+    length(Regex.scan(pattern, mlir))
+  end
+
+  # The production block skips on a host client, so the preflight drives the
+  # same FFI path through a block that lowers there instead.
+  defp host_forward(q, k, v, causal) do
+    softmax_scale = 1.0 / :math.sqrt(Nx.axis_size(q, 3))
+    {output, lse} = FFI.forward(q, k, v, causal, softmax_scale, HostTestBlock.Forward)
+
+    case q.data do
+      %Nx.Defn.Expr{} ->
+        graded =
+          custom_grad(output, [q, k, v], fn doutput ->
+            doutput = Nx.as_type(doutput, q.type)
+
+            FFI.backward(
+              q,
+              k,
+              v,
+              output,
+              lse,
+              doutput,
+              causal,
+              softmax_scale,
+              HostTestBlock.Backward
+            )
+            |> Tuple.to_list()
+          end)
+
+        {graded, lse}
+
+      _ ->
+        {output, lse}
+    end
   end
 end
