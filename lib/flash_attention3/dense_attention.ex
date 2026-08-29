@@ -4,9 +4,7 @@ defmodule FlashAttention3.DenseAttention do
 
   This is the formulation FlashAttention replaces: it allocates the full
   `{batch, heads, seqlen_q, seqlen_k}` scores, softmaxes them, and multiplies
-  by V. PyTorch calls this SDPA backend `math` and Transformers calls it
-  `eager`. It is deliberately not named for FlashAttention, because it is the
-  thing FlashAttention is not.
+  by V.
 
   It exists because `Nx.Defn.Expr.block/4` applies a block's default
   implementation on every trace, before any backend decides whether to replace

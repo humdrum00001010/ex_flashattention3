@@ -43,7 +43,7 @@ defmodule FlashAttention3.FFI do
   def forward(q, k, v, causal, softmax_scale, block \\ Block.Forward) do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
 
-    results = [
+    templates = [
       # output
       Nx.template({dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}, q.type),
       # lse, always FP32 and BHQ-ordered whatever the input dtype
@@ -56,10 +56,10 @@ defmodule FlashAttention3.FFI do
 
     block
     |> struct!(causal: causal, softmax_scale: softmax_scale)
-    |> Nx.block([q, k, v], List.to_tuple(results), fn block, q, k, v ->
+    |> Nx.block([q, k, v], List.to_tuple(templates), fn block, q, k, v ->
       q
       |> DenseAttention.attention(k, v, options(block))
-      |> pad_scratch(results, @forward_results)
+      |> pad_scratch(templates, @forward_results)
     end)
     |> drop_scratch(@forward_results)
   end
@@ -100,7 +100,7 @@ defmodule FlashAttention3.FFI do
     softmax_stats =
       Nx.template({dims.batch, dims.q_heads, scratch.seqlen_q_rounded}, {:f, 32})
 
-    results = [
+    templates = [
       # dq, dk, dv
       Nx.template(q.shape, q.type),
       Nx.template(k.shape, k.type),
@@ -133,11 +133,11 @@ defmodule FlashAttention3.FFI do
     |> struct!(causal: causal, softmax_scale: softmax_scale)
     |> Nx.block(
       [q, k, v, output, lse, doutput],
-      List.to_tuple(results),
+      List.to_tuple(templates),
       fn block, q, k, v, _output, _lse, doutput ->
         q
         |> DenseAttention.backward(k, v, doutput, options(block))
-        |> pad_scratch(results, @backward_results)
+        |> pad_scratch(templates, @backward_results)
       end
     )
     |> drop_scratch(@backward_results)
