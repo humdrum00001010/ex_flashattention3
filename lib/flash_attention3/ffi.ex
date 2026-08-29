@@ -3,13 +3,29 @@ defmodule FlashAttention3.FFI do
   The boundary between an Nx block and the FA3 handler ABI.
   Nx sees the results; the handler sees those plus its scratch.
   This module maps between them: pad going in, drop coming out.
-  Scratch is accumulators and counters, not part of attention.
-  It is declared, not allocated: XLA gives handlers no allocator.
-  Command buffers also need addresses fixed at compile time.
-  Block tuple size equals result count equals `result_layouts` length.
+
+  Scratch is memory the kernel needs while it runs.
+  Accumulators for partial gradients, counters that order them.
+  It carries nothing the caller can use and is never read here.
+  The zeros padded in on the default path are not values.
+
+  StableHLO has no scratch, and FFI handlers get no allocator.
+  Declaring it as a result is the only way to hand memory over.
+  XLA allocates it because the custom call says it returns it.
+
+  Allocating inside the handler would also defeat capture.
+  A captured command buffer fixes addresses at compile time.
+  That is what lets a chain of calls become one buffer.
+
+  So the shapes have to be known before the kernel runs.
+  `FlashAttention3.Kernel.scratch_extents/2` computes them.
+  It mirrors the kernel's tiling, pinned to one FA3 commit.
+
+  Block tuple size equals result count equals `result_layouts`.
   `Nx.Defn.Expr.block/4` sizes the block from the default's return.
   It ignores the output template, so the default must be padded.
   Breaking that equality fails MLIR verification.
+
   Buffers are named for their parameters in `native/fa3_xla.cc`.
   """
 
@@ -53,7 +69,7 @@ defmodule FlashAttention3.FFI do
   def backward(q, k, v, output, lse, doutput, causal, softmax_scale, block \\ Block.Backward) do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
     FlashAttention3.Kernel.backward_operands!(dims, output, lse, doutput, q.type)
-    workspace = FlashAttention3.Kernel.workspace(dims, causal)
+    scratch = FlashAttention3.Kernel.scratch_extents(dims, causal)
 
     # FA3's backward is tiled over a grid of query blocks by key blocks, and
     # every output element is a sum over one of those axes: dQ over all key
@@ -80,7 +96,7 @@ defmodule FlashAttention3.FFI do
     # read out of the CUTLASS kernel. The shapes and the params wiring in
     # native/fa3_xla.cc are.
     softmax_stats =
-      Nx.template({dims.batch, dims.q_heads, workspace.seqlen_q_rounded}, {:f, 32})
+      Nx.template({dims.batch, dims.q_heads, scratch.seqlen_q_rounded}, {:f, 32})
 
     results = [
       # dq, dk, dv
@@ -94,18 +110,18 @@ defmodule FlashAttention3.FFI do
       # dq_accum: FP32 accumulator, since query blocks are reduced across
       # key blocks and bf16 would lose the partial sums
       Nx.template(
-        {dims.batch, dims.q_heads, workspace.seqlen_q_rounded, dims.head_dim},
+        {dims.batch, dims.q_heads, scratch.seqlen_q_rounded, dims.head_dim},
         {:f, 32}
       ),
       # dq_semaphore: one counter per query block, ordering those accumulations
-      Nx.template({workspace.q_blocks, dims.batch, dims.q_heads}, {:s, 32}),
+      Nx.template({scratch.q_blocks, dims.batch, dims.q_heads}, {:s, 32}),
       # dk_accum and dv_accum, keyed by KV head rather than query head
       Nx.template(
-        {dims.batch, dims.kv_heads, workspace.seqlen_k_rounded, dims.head_dim},
+        {dims.batch, dims.kv_heads, scratch.seqlen_k_rounded, dims.head_dim},
         {:f, 32}
       ),
       Nx.template(
-        {dims.batch, dims.kv_heads, workspace.seqlen_k_rounded, dims.value_dim},
+        {dims.batch, dims.kv_heads, scratch.seqlen_k_rounded, dims.value_dim},
         {:f, 32}
       )
     ]

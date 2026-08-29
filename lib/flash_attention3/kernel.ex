@@ -141,14 +141,14 @@ defmodule FlashAttention3.Kernel do
   end
 
   @doc """
-  Returns the rounded extents that size the backward workspaces.
+  Returns the rounded extents that size the backward scratch buffers.
 
   This mirrors the tile selection in the FA3 backward kernel. The workspaces
   are compiler-owned results rather than handler-side scratch so that they stay
   capturable in a CUDA command buffer, which is why their geometry has to be
   known here.
   """
-  def workspace(%{head_dim: head_dim, seqlen_q: seqlen_q, seqlen_k: seqlen_k}, causal) do
+  def scratch_extents(%{head_dim: head_dim, seqlen_q: seqlen_q, seqlen_k: seqlen_k}, causal) do
     block_m = if head_dim <= 128, do: if(causal, do: 64, else: 80), else: 64
     block_n = if head_dim <= 128, do: 128, else: 80
     seqlen_q_rounded = round_up(seqlen_q, block_m)
@@ -177,14 +177,14 @@ defmodule FlashAttention3.Kernel do
   """
   def backward([q, k, v, _output, _lse, _doutput], causal, softmax_scale) do
     dims = dims!(q, k, v, causal)
-    workspace = workspace(dims, causal)
+    scratch = scratch_extents(dims, causal)
 
     sizes =
       sizes(dims) ++
         [
-          p: workspace.seqlen_q_rounded,
-          q: workspace.seqlen_k_rounded,
-          r: workspace.q_blocks
+          p: scratch.seqlen_q_rounded,
+          q: scratch.seqlen_k_rounded,
+          r: scratch.q_blocks
         ]
 
     spec(@backward, q.type, sizes, causal, softmax_scale)
