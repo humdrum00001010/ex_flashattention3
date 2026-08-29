@@ -52,9 +52,14 @@ defmodule FlashAttention3 do
   @doc """
   Attention that also returns the FP32 log-sum-exp normalizer.
 
-  The LSE is laid out as `{batch, heads, sequence}`. It is not differentiable;
-  it is returned for callers that merge partial attention results across key
-  and value chunks, such as ring or context-parallel attention.
+  The LSE is laid out as `{batch, heads, sequence}`. It is returned for callers
+  that merge partial attention results across key and value chunks, such as ring
+  or context-parallel attention.
+
+  Its gradient is zero, not merely absent: FA3's backward produces no dLSE, so
+  the value is marked with `stop_grad/1`. A loss that reaches the inputs through
+  the LSE gets no contribution from that path and no warning. Merge with it,
+  do not differentiate through it.
   """
   deftransform attention_with_lse(q, k, v, opts \\ []) do
     opts = Keyword.validate!(opts, causal: false, softmax_scale: nil)
@@ -81,21 +86,38 @@ defmodule FlashAttention3 do
   #
   # `custom_grad/3` and `stop_grad/1` annotate expressions, so an eager call has
   # nothing to annotate and passes through.
-  defp attach_grad({output, lse}, %{data: %Nx.Defn.Expr{}} = q, k, v, causal, softmax_scale) do
-    graded =
-      custom_grad(output, [q, k, v], fn doutput ->
-        # Nx differentiates through an f32 scalar loss, so the cotangent
-        # arriving here is f32 even when FA3's output is bf16/f16. The upstream
-        # FA3 backward ABI requires dO to have the same element type as
-        # Q/K/V/O.
-        doutput = Nx.as_type(doutput, q.type)
+  defp attach_grad({output, lse}, q, k, v, causal, softmax_scale) do
+    case Enum.filter([{q, 0}, {k, 1}, {v, 2}], fn {t, _} -> expression?(t) end) do
+      [] ->
+        {output, lse}
 
-        {dq, dk, dv} = FFI.backward(q, k, v, output, lse, doutput, causal, softmax_scale)
-        [dq, dk, dv]
-      end)
+      differentiable ->
+        {inputs, positions} = Enum.unzip(differentiable)
 
-    {graded, stop_grad(lse)}
+        graded =
+          custom_grad(output, inputs, fn doutput ->
+            # Nx differentiates through an f32 scalar loss, so the cotangent
+            # arriving here is f32 even when FA3's output is bf16/f16. The
+            # upstream FA3 backward ABI requires dO to have the same element
+            # type as Q/K/V/O.
+            doutput = Nx.as_type(doutput, q.type)
+
+            gradients =
+              q
+              |> FFI.backward(k, v, output, lse, doutput, causal, softmax_scale)
+              |> Tuple.to_list()
+
+            Enum.map(positions, &Enum.at(gradients, &1))
+          end)
+
+        {graded, stop_grad(lse)}
+    end
   end
 
-  defp attach_grad(result, _q, _k, _v, _causal, _softmax_scale), do: result
+  # Only expressions carry gradients. `custom_grad/3` reads `.data.op` off every
+  # input it is given, so a constant among them raises, and treating the whole
+  # call as eager because one operand is constant would derive the gradient from
+  # the block's default instead of the kernel.
+  defp expression?(%{data: %Nx.Defn.Expr{}}), do: true
+  defp expression?(_), do: false
 end

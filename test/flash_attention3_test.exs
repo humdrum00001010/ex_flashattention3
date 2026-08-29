@@ -69,6 +69,34 @@ defmodule FlashAttention3Test do
     end
   end
 
+  describe "gradients over a subset of the operands" do
+    defp varied(shape) do
+      shape |> Nx.iota(type: {:f, 32}) |> Nx.divide(997) |> Nx.sin() |> Nx.as_type({:bf, 16})
+    end
+
+    test "match the corresponding slice of the full gradient" do
+      q = varied({1, 8, 8, 128})
+      k = varied({1, 8, 2, 128})
+      v = varied({1, 8, 2, 128})
+
+      loss = fn q, k, v -> FlashAttention3.attention(q, k, v, causal: true) |> Nx.sum() end
+
+      {full_q, full_k, full_v} =
+        Nx.Defn.grad({q, k, v}, fn {q, k, v} -> loss.(q, k, v) end)
+
+      # `custom_grad/3` reads `.data.op` off every input it is handed, so a
+      # constant among them used to raise, and skipping the override entirely
+      # when q happened to be constant derived the gradient from the block's
+      # default rather than the kernel.
+      only_q = Nx.Defn.grad(q, fn q -> loss.(q, k, v) end)
+      {only_k, only_v} = Nx.Defn.grad({k, v}, fn {k, v} -> loss.(q, k, v) end)
+
+      assert_all_close(only_q, full_q)
+      assert_all_close(only_k, full_k)
+      assert_all_close(only_v, full_v)
+    end
+  end
+
   describe "the emitted StableHLO" do
     test "carries the FA3 layouts and GQA sharding rule" do
       {q, k, v} = operands()
@@ -201,5 +229,9 @@ defmodule FlashAttention3Test do
       _ ->
         {output, lse}
     end
+  end
+
+  defp assert_all_close(left, right) do
+    assert Nx.to_number(Nx.all_close(left, right, atol: 1.0e-2, rtol: 1.0e-2)) == 1
   end
 end

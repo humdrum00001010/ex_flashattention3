@@ -221,16 +221,30 @@ defmodule FlashAttention3.Kernel do
   defp spec(call, type, sizes, causal, softmax_scale) do
     %Spec{
       call_target_name: Map.fetch!(call.targets, type),
-      attributes: [
-        {"causal", to_string(causal)},
-        {"softmax_scale", "#{softmax_scale} : f32"}
-      ],
+      attributes: handler_attributes(causal, softmax_scale),
       operation_attributes: [
         {"operand_layouts", layouts(call.operands)},
         {"result_layouts", layouts(call.results)},
         {"sdy.sharding_rule", sharding_rule(call, sizes)}
       ]
     }
+  end
+
+  # Interpolated straight into MLIR, so the scale has to render as a float
+  # literal. An integer parses as `1 : f32` and nil renders as nothing at all,
+  # both of which fail the MLIR parser rather than this function.
+  defp handler_attributes(causal, softmax_scale)
+       when is_boolean(causal) and is_number(softmax_scale) do
+    [
+      {"causal", to_string(causal)},
+      {"softmax_scale", "#{softmax_scale * 1.0} : f32"}
+    ]
+  end
+
+  defp handler_attributes(causal, softmax_scale) do
+    raise ArgumentError,
+          "FA3 requires a boolean causal and a numeric softmax_scale, got " <>
+            "#{inspect(causal)} and #{inspect(softmax_scale)}"
   end
 
   defp layouts(mappings),
