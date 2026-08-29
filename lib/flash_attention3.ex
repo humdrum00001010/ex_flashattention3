@@ -76,10 +76,12 @@ defmodule FlashAttention3 do
   # `value_and_grad`.
   #
   # FA3 cannot pay that. Its backward is a custom call taking O and LSE as
-  # operands, so deriving from the default would feed it dense-computed ones
-  # and put a full score-matrix attention on device to produce them. Wrapping
-  # from outside captures what the forward call returns, and grad
-  # short-circuits on the metadata node before reaching the block.
+  # operands, so deriving from the default feeds it dense-computed ones.
+  # Measured on the same shapes, differing only in placement: outside gives
+  # one forward call, one backward call and no dot_general; inside gives no
+  # forward call, one backward call and four dot_generals. The backward call
+  # still fires either way. What changes is that its operands come from a
+  # score-matrix attention rather than from the kernel.
   #
   # It has to wrap the block from outside. The closure captures `output` and
   # `lse`, and those become operands of the backward call, so they must be the
