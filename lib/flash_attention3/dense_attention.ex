@@ -1,17 +1,25 @@
 defmodule FlashAttention3.DenseAttention do
   @moduledoc """
-  Attention with the score matrix materialized.
+  Computes attention in Nx, with the score matrix materialized.
 
-  This is the formulation FlashAttention replaces: it allocates the full
-  `{batch, heads, seqlen_q, seqlen_k}` scores, softmaxes them, and multiplies
-  by V.
+      attention(q, k, v, opts)         -> {output, lse}
+      backward(q, k, v, doutput, opts) -> {dq, dk, dv}
 
-  It exists because `Nx.Defn.Expr.block/4` applies a block's default
-  implementation on every trace, before any backend decides whether to replace
-  it, so `Nx.block/4` cannot be used without one, and under
-  `Nx.Defn.Evaluator` it is what runs. It is required by the Nx API rather than
-  offered as a fallback: `FlashAttention3.Block` raises rather than skipping on
-  a non-CUDA client, so EXLA never compiles it.
+  BSHD operands, FP32 intermediates, LSE in BHQ order.
+  These are the results the kernel has to reproduce.
+  So this is also the oracle the two-GPU gate compares against.
+
+  It is not the entry point; `FlashAttention3.attention/4` is.
+  `Nx.Defn.Expr.block/4` applies a block's default implementation on
+  every trace, before any backend decides whether to replace it, so
+  `Nx.block/4` cannot be used without one, and under
+  `Nx.Defn.Evaluator` it is what runs.
+  `FlashAttention3.Block` raises rather than skipping on a non-CUDA
+  client, so EXLA never compiles it.
+
+  It allocates the full `{batch, heads, seqlen_q, seqlen_k}` scores.
+  That is the allocation FlashAttention exists to avoid.
+  Nothing here is usable at model sequence lengths.
   """
 
   alias FlashAttention3.DenseAttention.{Gqa, Scores}
