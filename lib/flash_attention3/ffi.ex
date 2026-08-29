@@ -1,10 +1,11 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
   The boundary between an Nx block and the FA3 handler ABI.
-  Nx sees the results; the handler sees those plus workspace.
+  Nx sees the results; the handler sees those plus its scratch.
   This module maps between them: pad going in, drop coming out.
-  Workspace crosses because XLA has no handler scratch.
-  It is declared, not allocated: command buffers fix addresses early.
+  Scratch is accumulators and counters, not part of attention.
+  It is declared, not allocated: XLA gives handlers no allocator.
+  Command buffers also need addresses fixed at compile time.
   Block tuple size equals result count equals `result_layouts` length.
   `Nx.Defn.Expr.block/4` sizes the block from the default's return.
   It ignores the output template, so the default must be padded.
@@ -14,13 +15,13 @@ defmodule FlashAttention3.FFI do
 
   alias FlashAttention3.{Block, DenseAttention}
 
-  # Leading results the operation keeps. The rest is workspace.
+  # Leading results the operation keeps. The rest is scratch.
   @forward_results 2
   @backward_results 3
 
   @doc """
   Runs the forward custom call.
-  Returns `{output, lse}`; the call also declares one workspace buffer.
+  Returns `{output, lse}`; the call also declares one scratch buffer.
   """
   def forward(q, k, v, causal, softmax_scale, block \\ Block.Forward) do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
@@ -30,7 +31,8 @@ defmodule FlashAttention3.FFI do
       Nx.template({dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}, q.type),
       # lse, always FP32 and BHQ-ordered whatever the input dtype
       Nx.template({dims.batch, dims.q_heads, dims.seqlen_q}, {:f, 32}),
-      # workspace: tile-scheduler state, one entry per batch
+      # workspace: the tile scheduler's counter. Only the first element is
+      # used, and only when causal; the rest is ABI padding.
       Nx.template({dims.batch}, {:s, 32})
     ]
 
@@ -39,14 +41,14 @@ defmodule FlashAttention3.FFI do
     |> Nx.block([q, k, v], List.to_tuple(results), fn block, q, k, v ->
       q
       |> DenseAttention.attention(k, v, options(block))
-      |> pad_workspaces(results, @forward_results)
+      |> pad_scratch(results, @forward_results)
     end)
-    |> drop_workspaces(@forward_results)
+    |> drop_scratch(@forward_results)
   end
 
   @doc """
   Runs the backward custom call.
-  Returns `{dq, dk, dv}`; the call declares six workspace buffers.
+  Returns `{dq, dk, dv}`; the call declares six scratch buffers.
   """
   def backward(q, k, v, output, lse, doutput, causal, softmax_scale, block \\ Block.Backward) do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
@@ -94,18 +96,18 @@ defmodule FlashAttention3.FFI do
       fn block, q, k, v, _output, _lse, doutput ->
         q
         |> DenseAttention.backward(k, v, doutput, options(block))
-        |> pad_workspaces(results, @backward_results)
+        |> pad_scratch(results, @backward_results)
       end
     )
-    |> drop_workspaces(@backward_results)
+    |> drop_scratch(@backward_results)
   end
 
   defp options(block), do: block |> Map.from_struct() |> Map.to_list()
 
   # Widens the default's results to the native tuple size.
   # The zeros are never read: EXLA drops this branch when a spec
-  # is returned, and the kernel writes its own workspace when not.
-  defp pad_workspaces(results, templates, result_count) do
+  # is returned, and the kernel writes its own scratch when not.
+  defp pad_scratch(results, templates, result_count) do
     workspaces =
       for template <- Enum.drop(templates, result_count),
           do: Nx.broadcast(Nx.tensor(0, type: template.type), template.shape)
@@ -113,9 +115,9 @@ defmodule FlashAttention3.FFI do
     (Tuple.to_list(results) ++ workspaces) |> List.to_tuple()
   end
 
-  # Inverse of pad_workspaces/3.
+  # Inverse of pad_scratch/3.
   # Takes the leading results, so the handler must declare them first.
-  # XLA still allocates the workspace; this only hides it.
-  defp drop_workspaces(native, result_count),
+  # XLA still allocates the scratch; this only hides it.
+  defp drop_scratch(native, result_count),
     do: native |> Tuple.to_list() |> Enum.take(result_count) |> List.to_tuple()
 end
