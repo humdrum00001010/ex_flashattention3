@@ -10,6 +10,16 @@ defmodule FlashAttention3.Kernel do
 
   alias EXLA.CustomCall.Spec
 
+  # Not a property of FlashAttention-3. CUTLASS kernels are templates
+  # parameterized by head dimension and dtype, and upstream ships each
+  # instantiation as its own translation unit because each is a slow, large
+  # compile. The native build links eight of them: forward and backward, head
+  # dimensions 128 and 256, BF16 and FP16, all sm90. These lists and the target
+  # map below are that choice mirrored, so an unsupported combination fails at
+  # trace time rather than as a missing symbol.
+  #
+  # Widening either means adding instantiations to the native build first.
+  # Editing only these emits a call nothing can service.
   @head_dims [128, 256]
 
   # Shardy dimension variables, shared by both directions:
