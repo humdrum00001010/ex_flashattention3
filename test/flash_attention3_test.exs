@@ -54,6 +54,14 @@ defmodule FlashAttention3Test do
       assert_raise ArgumentError, ~r/v to match k's sequence length and head count/, fn ->
         FFI.forward(bf16({1, 8, 8, 128}), bf16({1, 4, 2, 128}), bf16({1, 8, 2, 128}), false, 0.1)
       end
+
+      # A vectorized axis is invisible to `shape` but becomes a leading buffer
+      # dimension, so rank-4 validation would pass while XLA emits rank 5.
+      vec = &Nx.vectorize(bf16(Tuple.insert_at(&1, 0, 2)), :b)
+
+      assert_raise ArgumentError, ~r/does not accept vectorized tensors/, fn ->
+        FFI.forward(vec.({1, 8, 8, 128}), vec.({1, 8, 2, 128}), vec.({1, 8, 2, 128}), true, 0.125)
+      end
     end
   end
 

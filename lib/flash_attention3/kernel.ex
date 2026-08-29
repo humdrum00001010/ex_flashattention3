@@ -59,6 +59,17 @@ defmodule FlashAttention3.Kernel do
   Validates Q, K, and V against the kernel and returns their named dimensions.
   """
   def dims!(q, k, v, causal) do
+    # A vectorized axis is not part of `shape`, but it is a leading dimension
+    # of the buffer XLA passes. Validation here would see rank 4 while the
+    # handler received rank 5, against layouts declaring rank 4.
+    unless q.vectorized_axes == [] and k.vectorized_axes == [] and
+             v.vectorized_axes == [] do
+      raise ArgumentError,
+            "FA3 does not accept vectorized tensors: the kernel's ABI is " <>
+              "rank-4 BSHD and a vectorized axis becomes a fifth buffer " <>
+              "dimension. Devectorize and fold the axis into the batch first."
+    end
+
     {batch, seqlen_q, q_heads, head_dim} = rank4!(q, "q")
     {k_batch, seqlen_k, kv_heads, k_head_dim} = rank4!(k, "k")
     {v_batch, v_seqlen_k, v_kv_heads, value_dim} = rank4!(v, "v")
