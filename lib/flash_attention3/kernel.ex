@@ -4,8 +4,8 @@ defmodule FlashAttention3.Kernel do
 
   This is the whole ABI in one place: which handler runs for a dtype, what
   shapes the kernel admits, how its buffers are laid out, and which dimension
-  it can be partitioned over. It mirrors `native/fa3_xla.cc` and nothing here
-  changes without a matching change there.
+  it can be partitioned over. It mirrors the native handler's signature, and
+  nothing here changes without a matching change there.
   """
 
   alias EXLA.CustomCall.Spec

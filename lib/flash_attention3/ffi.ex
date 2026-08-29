@@ -26,7 +26,7 @@ defmodule FlashAttention3.FFI do
   It ignores the output template, so the default must be padded.
   Breaking that equality fails MLIR verification.
 
-  Buffers are named for their parameters in `native/fa3_xla.cc`.
+  Buffers are named for the handler parameters they map to.
   """
 
   alias FlashAttention3.{Block, DenseAttention}
@@ -93,8 +93,8 @@ defmodule FlashAttention3.FFI do
     # block, so they share a shape.
     #
     # The tiling described here is FA3's documented structure, not something
-    # read out of the CUTLASS kernel. The shapes and the params wiring in
-    # native/fa3_xla.cc are.
+    # read out of the CUTLASS kernel. The shapes and the parameter each buffer
+    # binds to were read from the handler's signature.
     softmax_stats =
       Nx.template({dims.batch, dims.q_heads, scratch.seqlen_q_rounded}, {:f, 32})
 
