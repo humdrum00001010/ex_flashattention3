@@ -62,15 +62,18 @@ defmodule FlashAttention3 do
 
   # Attaches the FA3 backward as the gradient of the output.
   #
-  # Nx differentiates a block by re-applying its default implementation and
-  # traversing that, which drops the custom call from the graph entirely --
-  # the forward as well as the backward. `Nx.LinAlg.qr/2` shows the effect:
-  # its forward lowers to a custom call, and its gradient lowers to none,
-  # inlining the Nx implementation instead.
+  # This has to wrap the block from outside, which is not where Nx puts it.
+  # `Nx.LinAlg.qr/2` calls `custom_grad/3` inside the block's default, so grad
+  # re-applies that default and derives from it. The custom call still lowers,
+  # but the gradient recomputes the forward through Nx to get the values it
+  # differentiates: 13 lines of MLIR for the loss alone, 194 for
+  # `value_and_grad`.
   #
-  # `custom_grad/3` is a metadata node that grad short-circuits on before it
-  # reaches the block, which is what keeps both calls. Without it, taking a
-  # gradient would silently replace FA3 with dense attention.
+  # FA3 cannot pay that. Its backward is a custom call taking O and LSE as
+  # operands, so deriving from the default would feed it dense-computed ones
+  # and put a full score-matrix attention on device to produce them. Wrapping
+  # from outside captures what the forward call returns, and grad
+  # short-circuits on the metadata node before reaching the block.
   #
   # It has to wrap the block from outside. The closure captures `output` and
   # `lse`, and those become operands of the backward call, so they must be the
