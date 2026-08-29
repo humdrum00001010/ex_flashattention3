@@ -33,6 +33,17 @@ defmodule FlashAttention3.Kernel do
   #
   # A mapping's length is its buffer's rank, so the layout constraints are
   # derived from these rather than repeated alongside them.
+  #
+  # Shardy orders a dimension's factors major to minor, and the head axis is
+  # KV-major: `q_head = kv_head * groups + group`. That is the kernel's layout,
+  # not a choice made here. `DenseAttention.Gqa.expand/2` mirrors it and
+  # `TensorParallel` assumes it; what ties either to the kernel is the two-GPU
+  # gate, which compares kernel output against that dense implementation at
+  # four groups, where the two orders diverge.
+  #
+  # Hence `m` before `l`. Only `m` is shardable: query heads within a group
+  # read one shared KV pair, so splitting `l` would put readers of the same KV
+  # on different devices and need a collective inside attention.
 
   @forward %{
     targets: %{{:bf, 16} => "fa3_forward_bf16", {:f, 16} => "fa3_forward_f16"},
