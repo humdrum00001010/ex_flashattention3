@@ -76,12 +76,17 @@ defmodule FlashAttention3 do
   # `value_and_grad`.
   #
   # FA3 cannot pay that. Its backward is a custom call taking O and LSE as
-  # operands, so deriving from the default feeds it dense-computed ones.
-  # Measured on the same shapes, differing only in placement: outside gives
-  # one forward call, one backward call and no dot_general; inside gives no
-  # forward call, one backward call and four dot_generals. The backward call
-  # still fires either way. What changes is that its operands come from a
-  # score-matrix attention rather than from the kernel.
+  # operands, and `parents_args(:block, ...)` re-applies the default callback
+  # during grad, building a fresh custom_grad node whose closure captures the
+  # freshly built dense expressions. The closure grad invokes is not the one
+  # written here.
+  #
+  # So the backward call still fires, but its operands come from a score-matrix
+  # attention rather than from the kernel. Measured under `value_and_grad` on
+  # the same shapes, differing only in placement: outside is one forward call,
+  # one backward call, no dot_general. Inside is one forward call, one backward
+  # call and four dot_generals -- attention computed twice, once by the kernel
+  # for the value and once densely for the gradient's operands.
   #
   # It has to wrap the block from outside. The closure captures `output` and
   # `lse`, and those become operands of the backward call, so they must be the
