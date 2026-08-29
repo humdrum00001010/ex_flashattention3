@@ -6,12 +6,17 @@ defmodule FlashAttention3 do
   tensors, is differentiable through `Nx.Defn.grad/2`, and is callable from
   `defn`.
 
-  This is a binding to the Hopper kernel, not an attention library: there is no
-  portable implementation behind it. On a CUDA client with BF16 or FP16 and a
-  head dimension of 128 or 256 it lowers to the native kernel, and anywhere
-  else it raises. A score-matrix fallback would silently change the memory
-  complexity of the model that called it, which is the cost FlashAttention
-  exists to avoid.
+  This is a binding to the Hopper kernel, not an attention library. Compiled
+  with EXLA it lowers to the native kernel on a CUDA client with BF16 or FP16
+  and a head dimension of 128 or 256, and raises on any other client rather
+  than substituting a score-matrix attention that would change the memory
+  complexity of the model that called it.
+
+  That refusal lives in `FlashAttention3.Block`, which only EXLA consults.
+  Called eagerly or under `Nx.Defn.Evaluator` there is no such gate, and
+  `FlashAttention3.DenseAttention` runs instead. It is correct and it is what
+  the tests compare against, but it materializes the score matrix, so treat
+  those paths as small-shape only.
 
   Loading the native library is the application's job. The FFI targets and the
   custom-call partitioner are registered by `libfa3_xla.so`'s static
@@ -52,10 +57,14 @@ defmodule FlashAttention3 do
 
     q
     |> FFI.forward(k, v, causal, softmax_scale)
-    |> differentiate(q, k, v, causal, softmax_scale)
+    |> attach_grad(q, k, v, causal, softmax_scale)
   end
 
-  defp differentiate({output, lse}, %{data: %Nx.Defn.Expr{}} = q, k, v, causal, softmax_scale) do
+  # Attaches the FA3 backward as the gradient of the output. `custom_grad/3`
+  # and `stop_grad/1` annotate expressions, so an eager call has nothing to
+  # annotate and passes through; its gradient, if taken at all, comes from
+  # differentiating `DenseAttention` directly.
+  defp attach_grad({output, lse}, %{data: %Nx.Defn.Expr{}} = q, k, v, causal, softmax_scale) do
     graded =
       custom_grad(output, [q, k, v], fn doutput ->
         # Nx differentiates through an f32 scalar loss, so the cotangent
@@ -71,5 +80,5 @@ defmodule FlashAttention3 do
     {graded, stop_grad(lse)}
   end
 
-  defp differentiate(result, _q, _k, _v, _causal, _softmax_scale), do: result
+  defp attach_grad(result, _q, _k, _v, _causal, _softmax_scale), do: result
 end

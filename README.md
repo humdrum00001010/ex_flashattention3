@@ -45,6 +45,10 @@ no fallback: a score-matrix attention would silently change the memory
 complexity of the model that called it, which is the cost FlashAttention exists
 to avoid.
 
+That gate lives in the block, which only EXLA consults. Called eagerly or under
+`Nx.Defn.Evaluator`, `FlashAttention3.DenseAttention` runs instead, so those
+paths are small-shape only.
+
 `FlashAttention3.DenseAttention` is the formulation FlashAttention replaces —
 the materialized score matrix, PyTorch's `math` backend. It exists only because
 `Nx.block/4` applies a block's default implementation on every trace and cannot
