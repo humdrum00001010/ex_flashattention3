@@ -48,8 +48,9 @@ defmodule FlashAttention3.FFI do
       Nx.template({dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}, q.type),
       # lse, always FP32 and BHQ-ordered whatever the input dtype
       Nx.template({dims.batch, dims.q_heads, dims.seqlen_q}, {:f, 32}),
-      # workspace: the tile scheduler's counter. Only the first element is
-      # used, and only when causal; the rest is ABI padding.
+      # workspace: the tile scheduler's counter, S32 for the same reason
+      # the backward semaphore is. Only the first element is used, and
+      # only when causal; the rest is ABI padding.
       Nx.template({dims.batch}, {:s, 32})
     ]
 
@@ -108,15 +109,16 @@ defmodule FlashAttention3.FFI do
       softmax_stats,
       # softmax_lse_log2
       softmax_stats,
-      # dq_accum: FP32 accumulator, since query blocks are reduced across
-      # key blocks and bf16 would lose the partial sums
+      # dq_accum
       Nx.template(
         {dims.batch, dims.q_heads, scratch.seqlen_q_rounded, dims.head_dim},
         {:f, 32}
       ),
-      # dq_semaphore: one counter per query block, ordering those accumulations
+      # dq_semaphore. S32 because the handler casts it to int* and orders
+      # the accumulation with integer atomics, so the dtype is ABI rather
+      # than a choice about precision like the accumulators above.
       Nx.template({scratch.q_blocks, dims.batch, dims.q_heads}, {:s, 32}),
-      # dk_accum and dv_accum, keyed by KV head rather than query head
+      # dk_accum and dv_accum
       Nx.template(
         {dims.batch, dims.kv_heads, scratch.seqlen_k_rounded, dims.head_dim},
         {:f, 32}
