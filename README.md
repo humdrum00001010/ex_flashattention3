@@ -22,11 +22,18 @@ dimensions 128 and 256. FP8 backward is not supported or claimed.
 ## Use
 
 ```elixir
-FlashAttention3.Native.load!()
-
 defn block(q, k, v) do
   FlashAttention3.attention(q, k, v, causal: true)
 end
+```
+
+The application loads `libfa3_xla.so` once, before compiling anything that
+contains an FA3 call. The FFI targets and the custom-call partitioner are
+registered by the library's static initializers, so loading it is the whole
+registration step:
+
+```elixir
+:ok = EXLA.NIF.load_dylib("/absolute/path/to/libfa3_xla.so")
 ```
 
 Q, K, and V are BSHD `{batch, sequence, heads, dim}`. The result is the

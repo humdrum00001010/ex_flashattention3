@@ -9,8 +9,10 @@ defmodule FlashAttention3 do
   `FlashAttention3.Reference`, which defines the same operation but
   materializes the full score matrix.
 
-  The native library must be loaded once before use, see
-  `FlashAttention3.Native.load!/0`.
+  Loading the native library is the application's job: the FFI targets are
+  registered by `libfa3_xla.so`'s static initializers, so the application must
+  load it into the OS process before compiling a computation that contains
+  them.
 
   ## Options
 
