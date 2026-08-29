@@ -108,7 +108,7 @@ defmodule FlashAttention3Test do
       assert mlir =~ "operand_layouts = [dense<[3, 2, 1, 0]>"
       assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
       assert mlir =~ "sdy.sharding_rule = #sdy.op_sharding_rule<"
-      assert mlir =~ "[i, j, lm, n]"
+      assert mlir =~ "[i, j, ml, n]"
       assert mlir =~ "need_replication={i, j, k, l, n, o}, custom>"
     end
 

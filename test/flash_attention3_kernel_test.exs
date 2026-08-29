@@ -47,8 +47,8 @@ defmodule FlashAttention3.KernelTest do
     assert {"sdy.sharding_rule", sharding_rule} =
              List.keyfind(operation_attributes, "sdy.sharding_rule", 0)
 
-    assert sharding_rule =~ "([i, j, lm, n], [i, k, m, n], [i, k, m, o])->"
-    assert sharding_rule =~ "([i, j, lm, o], [i, lm, j], [i])"
+    assert sharding_rule =~ "([i, j, ml, n], [i, k, m, n], [i, k, m, o])->"
+    assert sharding_rule =~ "([i, j, ml, o], [i, ml, j], [i])"
     assert sharding_rule =~ "{i=2, j=16, k=16, l=4, m=2, n=128, o=128}"
     assert sharding_rule =~ "need_replication={i, j, k, l, n, o}, custom>"
 

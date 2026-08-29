@@ -24,7 +24,7 @@ defmodule FlashAttention3.Kernel do
 
   # Shardy dimension variables, shared by both directions:
   #
-  #   i batch      j seqlen_q   k seqlen_k   lm q_heads (l groups x m kv_heads)
+  #   i batch      j seqlen_q   k seqlen_k   ml q_heads (m kv_heads x l groups)
   #   n head_dim   o value_dim
   #
   # Backward adds the rounded scratch extents:
@@ -36,29 +36,29 @@ defmodule FlashAttention3.Kernel do
 
   @forward %{
     targets: %{{:bf, 16} => "fa3_forward_bf16", {:f, 16} => "fa3_forward_f16"},
-    operands: [[:i, :j, :lm, :n], [:i, :k, :m, :n], [:i, :k, :m, :o]],
-    results: [[:i, :j, :lm, :o], [:i, :lm, :j], [:i]],
+    operands: [[:i, :j, :ml, :n], [:i, :k, :m, :n], [:i, :k, :m, :o]],
+    results: [[:i, :j, :ml, :o], [:i, :ml, :j], [:i]],
     replicate: [:i, :j, :k, :l, :n, :o]
   }
 
   @backward %{
     targets: %{{:bf, 16} => "fa3_backward_bf16", {:f, 16} => "fa3_backward_f16"},
     operands: [
-      [:i, :j, :lm, :n],
+      [:i, :j, :ml, :n],
       [:i, :k, :m, :n],
       [:i, :k, :m, :o],
-      [:i, :j, :lm, :o],
-      [:i, :lm, :j],
-      [:i, :j, :lm, :o]
+      [:i, :j, :ml, :o],
+      [:i, :ml, :j],
+      [:i, :j, :ml, :o]
     ],
     results: [
-      [:i, :j, :lm, :n],
+      [:i, :j, :ml, :n],
       [:i, :k, :m, :n],
       [:i, :k, :m, :o],
-      [:i, :lm, :p],
-      [:i, :lm, :p],
-      [:i, :lm, :p, :n],
-      [:r, :i, :lm],
+      [:i, :ml, :p],
+      [:i, :ml, :p],
+      [:i, :ml, :p, :n],
+      [:r, :i, :ml],
       [:i, :m, :q, :n],
       [:i, :m, :q, :o]
     ],
