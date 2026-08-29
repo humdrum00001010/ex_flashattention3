@@ -89,6 +89,12 @@ defmodule FlashAttention3Test do
       assert calls(mlir, "fa3_forward_bf16") == 1
       assert calls(mlir, "fa3_backward_bf16") == 1
       assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
+
+      # Both calls carry their own Shardy rule, which is what lets shard_jit
+      # partition a training step and not just a forward pass. The backward
+      # rule is the one naming the rounded scratch extents.
+      assert mlir =~ "need_replication={i, j, k, l, n, o}, custom>"
+      assert mlir =~ "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
     end
 
     test "repeated calls stay inside one executable" do
