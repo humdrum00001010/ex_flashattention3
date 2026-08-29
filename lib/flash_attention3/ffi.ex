@@ -1,16 +1,23 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
-  Owns the native result contract for the FA3 custom calls.
+  Runs the FA3 custom calls and hides the kernel's scratch buffers.
 
-  The kernel returns compiler-owned workspaces alongside its semantic results.
-  Those exist only because a captured CUDA command buffer needs stable buffers,
-  so they are declared here, dropped here, and never reach the operation.
+  XLA has no notion of handler-side scratch, so FA3's working memory has to be
+  declared as extra results of the custom call and dropped again on the way
+  out. Forward returns two results and one scratch buffer; backward returns
+  three and six. Declaring them is mandatory, and dropping them here is what
+  keeps them out of the operation.
+
+  They are results rather than allocated inside the handler because a captured
+  CUDA command buffer needs its buffer addresses fixed at compile time, which
+  is also why their geometry has to be computed in Elixir. Every buffer below
+  is named for its parameter in `native/fa3_xla.cc`.
   """
 
   alias FlashAttention3.{Block, DenseAttention}
 
-  # The kernel returns its semantic results first and its compiler-owned
-  # workspaces after. These are the counts of the former.
+  # How many leading results the operation keeps. Everything after them is
+  # scratch.
   @forward_results 2
   @backward_results 3
 
@@ -21,8 +28,11 @@ defmodule FlashAttention3.FFI do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
 
     results = [
+      # output
       Nx.template({dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}, q.type),
+      # lse, always FP32 and BHQ-ordered whatever the input dtype
       Nx.template({dims.batch, dims.q_heads, dims.seqlen_q}, {:f, 32}),
+      # workspace: tile-scheduler state, one entry per batch
       Nx.template({dims.batch}, {:s, 32})
     ]
 
@@ -42,19 +52,29 @@ defmodule FlashAttention3.FFI do
     FlashAttention3.Kernel.backward_operands!(dims, output, lse, doutput, q.type)
     workspace = FlashAttention3.Kernel.workspace(dims, causal)
 
-    softmax = Nx.template({dims.batch, dims.q_heads, workspace.seqlen_q_rounded}, {:f, 32})
+    # softmax_d and softmax_lse_log2 share a shape; the sequence length is
+    # rounded up to the kernel's query-block size.
+    softmax_stats =
+      Nx.template({dims.batch, dims.q_heads, workspace.seqlen_q_rounded}, {:f, 32})
 
     results = [
+      # dq, dk, dv
       Nx.template(q.shape, q.type),
       Nx.template(k.shape, k.type),
       Nx.template(v.shape, v.type),
-      softmax,
-      softmax,
+      # softmax_d
+      softmax_stats,
+      # softmax_lse_log2
+      softmax_stats,
+      # dq_accum: FP32 accumulator, since query blocks are reduced across
+      # key blocks and bf16 would lose the partial sums
       Nx.template(
         {dims.batch, dims.q_heads, workspace.seqlen_q_rounded, dims.head_dim},
         {:f, 32}
       ),
+      # dq_semaphore: one counter per query block, ordering those accumulations
       Nx.template({workspace.q_blocks, dims.batch, dims.q_heads}, {:s, 32}),
+      # dk_accum and dv_accum, keyed by KV head rather than query head
       Nx.template(
         {dims.batch, dims.kv_heads, workspace.seqlen_k_rounded, dims.head_dim},
         {:f, 32}
