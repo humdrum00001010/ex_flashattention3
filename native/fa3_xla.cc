@@ -27,10 +27,10 @@ namespace ffi = xla::ffi;
 
 namespace {
 
-constexpr char kTarget[] = "exla_fa3_forward";
-constexpr char kTargetF16[] = "exla_fa3_forward_f16";
-constexpr char kBackwardTarget[] = "exla_fa3_backward";
-constexpr char kBackwardTargetF16[] = "exla_fa3_backward_f16";
+constexpr char kTarget[] = "fa3_forward_bf16";
+constexpr char kTargetF16[] = "fa3_forward_f16";
+constexpr char kBackwardTarget[] = "fa3_backward_bf16";
+constexpr char kBackwardTargetF16[] = "fa3_backward_f16";
 constexpr int kMaxCudaDevices = 16;
 
 std::array<std::atomic<int>, kMaxCudaDevices> cached_num_sms{};
@@ -696,7 +696,7 @@ const bool kPartitionerRegistered = [] {
 
 } // namespace
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_forward, Fa3ForwardBf16,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(fa3_forward_bf16, Fa3ForwardBf16,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<CUstream>>()
                                   .Ctx<ffi::DeviceOrdinal>()
@@ -711,9 +711,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_forward, Fa3ForwardBf16,
                               {ffi::Traits::kCmdBufferCompatible});
 
 XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), kTarget, "CUDA",
-                         exla_fa3_forward);
+                         fa3_forward_bf16);
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_forward_f16, Fa3ForwardF16,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(fa3_forward_f16, Fa3ForwardF16,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<CUstream>>()
                                   .Ctx<ffi::DeviceOrdinal>()
@@ -728,9 +728,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_forward_f16, Fa3ForwardF16,
                               {ffi::Traits::kCmdBufferCompatible});
 
 XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), kTargetF16, "CUDA",
-                         exla_fa3_forward_f16);
+                         fa3_forward_f16);
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_backward, Fa3BackwardBf16,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(fa3_backward_bf16, Fa3BackwardBf16,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<CUstream>>()
                                   .Ctx<ffi::DeviceOrdinal>()
@@ -754,9 +754,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_backward, Fa3BackwardBf16,
                               {ffi::Traits::kCmdBufferCompatible});
 
 XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), kBackwardTarget, "CUDA",
-                         exla_fa3_backward);
+                         fa3_backward_bf16);
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_backward_f16, Fa3BackwardF16,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(fa3_backward_f16, Fa3BackwardF16,
                               ffi::Ffi::Bind()
                                   .Ctx<ffi::PlatformStream<CUstream>>()
                                   .Ctx<ffi::DeviceOrdinal>()
@@ -780,4 +780,4 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(exla_fa3_backward_f16, Fa3BackwardF16,
                               {ffi::Traits::kCmdBufferCompatible});
 
 XLA_FFI_REGISTER_HANDLER(ffi::GetXlaFfiApi(), kBackwardTargetF16, "CUDA",
-                         exla_fa3_backward_f16);
+                         fa3_backward_f16);

@@ -3,12 +3,9 @@
 This is an executable boundary test for FlashAttention-3 under Nx/EXLA
 `shard_jit`. It is intentionally not an `Nx` primitive.
 
-See [RESULTS.md](RESULTS.md) for the exact two-H100 correctness, benchmark,
-and Nsight evidence.
-
 The ownership chain is:
 
-1. `FA3TP.forward/4` presents the tensor operation and an FP32 Nx fallback.
+1. `FlashAttention3.attention/4` presents the tensor operation.
 2. `Nx.block/4` preserves that operation as a compiler-visible block.
 3. `EXLA.CustomCall` selects a precision-specific StableHLO custom call and
    attaches row-major layout constraints plus a Shardy rule.
@@ -17,6 +14,50 @@ The ownership chain is:
 
 The implemented native paths are BF16 and FP16 forward/backward for head
 dimensions 128 and 256. FP8 backward is not supported or claimed.
+
+[RESULTS.md](RESULTS.md) records what the kernel measured on two H100s. It is
+kept as evidence of that run and is stale with respect to this tree; the header
+there says what changed under it.
+
+## Use
+
+```elixir
+defn block(q, k, v) do
+  FlashAttention3.attention(q, k, v, causal: true)
+end
+```
+
+The application loads `libfa3_xla.so` once, before compiling anything that
+contains an FA3 call. The FFI targets and the custom-call partitioner are
+registered by the library's static initializers, so loading it is the whole
+registration step:
+
+```elixir
+:ok = EXLA.NIF.load_dylib("/absolute/path/to/libfa3_xla.so")
+```
+
+Q, K, and V are BSHD `{batch, sequence, heads, dim}`. The result is the
+attention output; `attention_with_lse/4` also returns the FP32 log-sum-exp for
+callers that merge partial results across key/value chunks. Backward runs
+through `Nx.Defn.grad/2` and needs no separate call.
+
+This is a binding to the Hopper kernel, not an attention library. On a CUDA
+client the operation lowers to `fa3_forward_bf16`, `fa3_forward_f16`,
+`fa3_backward_bf16`, or `fa3_backward_f16`; on any other client it raises, and
+an unsupported dtype or head dimension is a caller error. There is deliberately
+no fallback: a score-matrix attention would silently change the memory
+complexity of the model that called it, which is the cost FlashAttention exists
+to avoid.
+
+That gate lives in the block, which only EXLA consults. Called eagerly or under
+`Nx.Defn.Evaluator`, `FlashAttention3.DenseAttention` runs instead, so those
+paths are small-shape only.
+
+`FlashAttention3.DenseAttention` is the formulation FlashAttention replaces —
+the materialized score matrix, PyTorch's `math` backend. It exists only because
+`Nx.block/4` applies a block's default implementation on every trace and cannot
+be used without one. The block raises rather than skipping, so EXLA never
+compiles it.
 
 ## Layout
 
@@ -58,9 +99,11 @@ installed. The native build is torch-free; it links the FA3/CUTLASS objects,
 
 ## CPU preflight
 
-CPU verifies the public fallback, analytic backward, StableHLO syntax,
-precision target selection, layouts, and Shardy attributes. It does not prove
-that a CUDA symbol loads or that TP executes on physical GPUs.
+CPU verifies StableHLO syntax, precision target selection, layouts, Shardy
+attributes, the head-parallel sharding policy, and the analytic backward of
+`DenseAttention`. Kernel numerics are not checked here and cannot be: there is no
+CPU path through FA3. It does not prove that a CUDA symbol loads or that TP
+executes on physical GPUs.
 
 ```sh
 mix format --check-formatted
@@ -89,47 +132,3 @@ The gate requires, in order:
 - an output-projection all-reduce after attention;
 - BF16 and FP16 single-GPU plus TP2 forward/backward gradients;
 - resident sharded-buffer reentry, with no hidden host staging.
-
-## Performance
-
-Default shape: causal `{4, 2048, 24, 4, 256}`. Throughput includes device
-completion and one PjRt boundary per compiled chain.
-
-| Precision | Operation | 1 GPU PFLOP/s | TP2 PFLOP/s (range) | TP2 scaling |
-| --- | --- | ---: | ---: | ---: |
-| BF16 | Forward | 0.71013 | 1.37167 (1.33706-1.39267) | 1.932x |
-| BF16 | Forward+backward | 0.34011 | 0.65769 (0.65539-0.65940) | 1.934x |
-| FP16 | Forward | 0.67875 | 1.27962 (1.27062-1.32992) | 1.885x |
-| FP16 | Forward+backward | 0.33967 | 0.65293 (0.64428-0.65551) | 1.922x |
-
-These are the fresh-image chain-64 medians; ranges are slow-to-fast throughput
-from the timing p90 and p10 samples. BF16 TP2 forward at chain 512 measured
-1.40401 PFLOP/s over 20 samples and 1.40032 PFLOP/s over a 50-sample repeat,
-or 98.87% and 98.61% of the 1.42 PFLOP/s target. An earlier 1.41490 PFLOP/s
-run was not reproduced on the fresh instance.
-
-The chain-512 HLO contains 512 FA3 calls and lowers to one command buffer with
-512 custom-call thunks. A short Nsight trace placed the kernel-only equivalent
-throughput at 1.400-1.422 PFLOP/s; the amortized EXLA/PjRt boundary is therefore
-not the steady-state bottleneck. See [RESULTS.md](RESULTS.md) for the breakdown.
-
-The resident-input benchmark needs EXLA's sharded-buffer re-entry behavior in
-addition to `EXLA.CustomCall.Spec.operation_attributes`. They are independent
-changes; the operation-attributes change alone does not fix buffer placement.
-
-Run the full forward/backward benchmark:
-
-```sh
-FA3_TP_BENCHMARK=1 \
-mix test test/fa3_tp_integration_test.exs --include integration
-```
-
-Run the BF16 saturation probe:
-
-```sh
-FA3_TP_BENCHMARK=1 FA3_TP_PRECISION=bf16 FA3_TP_FORWARD_ONLY=1 \
-FA3_TP_CHAIN_LENGTH=512 FA3_TP_WARMUP=5 FA3_TP_ITERATIONS=20 \
-mix test test/fa3_tp_integration_test.exs --include integration
-```
-
-See [RESULTS.md](RESULTS.md) for scaling, proof, and hashes.

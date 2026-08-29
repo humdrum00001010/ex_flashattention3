@@ -3,6 +3,32 @@
 Fresh-image rerun: 2026-08-28, 2x NVIDIA H100 80GB HBM3 SXM, NV18, CUDA 13.0,
 cuDNN 9.12, XLA 0.10.0, Elixir 1.20.2, OTP 29.0.2.
 
+## Stale
+
+This records what the kernel did on hardware at the commit in Reproducibility
+below. It is kept as evidence, not as a claim about the current tree, which has
+since become a library rather than a benchmarking harness. Do not read any
+number here as reproducible from a checkout of this repository today.
+
+What changed under it:
+
+- The FFI targets were renamed out of EXLA's namespace, so the `libfa3_xla.so`
+  hash below is a build exporting `exla_fa3_forward`, not `fa3_forward_bf16`.
+- The Shardy rule now declares the head axis KV-major (`ml`). These runs used
+  the earlier order, and the difference is invisible below because the recorded
+  TP2 shapes are the same under either.
+- `FA3TP` became `FlashAttention3`, and the chain benchmark and container entry
+  points that produced the throughput figures were removed with it. Reproducing
+  them means restoring that harness first.
+- The operation now rejects at trace time what it previously deferred to the
+  handler: unsupported dtype and head dimension, non-square attention,
+  vectorized inputs, and heads that do not form GQA groups.
+- CPU preflight is 15 tests, not the 6 recorded under Correctness.
+
+The correctness gate itself is unchanged in intent and still lives in
+`test/flash_attention3_integration_test.exs`, but it has not been rerun since
+any of the above.
+
 ## Correctness
 
 - With the operation-attributes candidate alone, single-GPU and TP2 BF16/FP16
