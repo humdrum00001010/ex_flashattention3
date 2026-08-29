@@ -34,8 +34,8 @@ attention output; `attention_with_lse/4` also returns the FP32 log-sum-exp for
 callers that merge partial results across key/value chunks. Backward runs
 through `Nx.Defn.grad/2` and needs no separate call.
 
-On a CUDA client the operation lowers to `exla_fa3_forward`,
-`exla_fa3_forward_f16`, `exla_fa3_backward`, or `exla_fa3_backward_f16`. An unsupported
+On a CUDA client the operation lowers to `fa3_forward_bf16`,
+`fa3_forward_f16`, `fa3_backward_bf16`, or `fa3_backward_f16`. An unsupported
 dtype or head dimension is a caller error there rather than a reason to fall
 back, because `FlashAttention3.Reference` materializes the full score matrix
 and is not viable at model sequence lengths. On any other client the operation

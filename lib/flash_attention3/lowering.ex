@@ -4,8 +4,8 @@ defmodule FlashAttention3.Lowering do
   alias EXLA.CustomCall.Spec
   alias FlashAttention3.{Shape, StableHLO}
 
-  @forward_targets %{{:bf, 16} => "exla_fa3_forward", {:f, 16} => "exla_fa3_forward_f16"}
-  @backward_targets %{{:bf, 16} => "exla_fa3_backward", {:f, 16} => "exla_fa3_backward_f16"}
+  @forward_targets %{{:bf, 16} => "fa3_forward_bf16", {:f, 16} => "fa3_forward_f16"}
+  @backward_targets %{{:bf, 16} => "fa3_backward_bf16", {:f, 16} => "fa3_backward_f16"}
   @head_dims [128, 256]
 
   @doc """

@@ -84,7 +84,7 @@ defmodule FA3TP.ContractTest do
 
     %{mlir_module: mlir} = EXLA.to_mlir_module(fun, [q, k, v], client: :host)
 
-    assert mlir =~ "stablehlo.custom_call @exla_fa3_forward"
+    assert mlir =~ "stablehlo.custom_call @fa3_forward_bf16"
     assert mlir =~ "operand_layouts = [dense<[3, 2, 1, 0]>"
     assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
     assert mlir =~ "sdy.sharding_rule = #sdy.op_sharding_rule<"
@@ -109,8 +109,8 @@ defmodule FA3TP.ContractTest do
     %{mlir_module: mlir} =
       EXLA.to_mlir_module(fun, [q, k, v, doutput], client: :host)
 
-    assert mlir =~ "stablehlo.custom_call @exla_fa3_forward"
-    assert mlir =~ "stablehlo.custom_call @exla_fa3_backward"
+    assert mlir =~ "stablehlo.custom_call @fa3_forward_bf16"
+    assert mlir =~ "stablehlo.custom_call @fa3_backward_bf16"
     assert mlir =~ "result_layouts = [dense<[3, 2, 1, 0]>"
   end
 
@@ -139,13 +139,13 @@ defmodule FA3TP.ContractTest do
     %{mlir_module: backward_mlir} =
       EXLA.to_mlir_module(forward_backward, [q, k, v, doutput], client: :host)
 
-    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_fa3_forward/, forward_mlir)) ==
+    assert length(Regex.scan(~r/stablehlo\.custom_call @fa3_forward_bf16/, forward_mlir)) ==
              2
 
-    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_fa3_forward/, backward_mlir)) ==
+    assert length(Regex.scan(~r/stablehlo\.custom_call @fa3_forward_bf16/, backward_mlir)) ==
              2
 
-    assert length(Regex.scan(~r/stablehlo\.custom_call @exla_fa3_backward/, backward_mlir)) ==
+    assert length(Regex.scan(~r/stablehlo\.custom_call @fa3_backward_bf16/, backward_mlir)) ==
              2
   end
 

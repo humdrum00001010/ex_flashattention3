@@ -12,7 +12,7 @@ defmodule FlashAttention3.LoweringTest do
     v = bf16({2, 16, 2, 128})
 
     assert %Spec{
-             call_target_name: "exla_fa3_forward",
+             call_target_name: "fa3_forward_bf16",
              attributes: [{"causal", "true"}, {"softmax_scale", "0.125 : f32"}],
              operation_attributes: operation_attributes
            } = Lowering.forward(q, k, v, true, 0.125)
@@ -35,7 +35,7 @@ defmodule FlashAttention3.LoweringTest do
     assert sharding_rule =~ "{i=2, j=16, k=16, l=4, m=2, n=128, o=128}"
     assert sharding_rule =~ "need_replication={i, j, k, l, n, o}, custom>"
 
-    assert %Spec{call_target_name: "exla_fa3_forward_f16"} =
+    assert %Spec{call_target_name: "fa3_forward_f16"} =
              Lowering.forward(
                Nx.template({2, 16, 8, 128}, {:f, 16}),
                Nx.template({2, 16, 2, 128}, {:f, 16}),
@@ -51,7 +51,7 @@ defmodule FlashAttention3.LoweringTest do
     v = bf16({2, 16, 2, 128})
 
     assert %Spec{
-             call_target_name: "exla_fa3_backward",
+             call_target_name: "fa3_backward_bf16",
              attributes: [{"causal", "true"}, {"softmax_scale", "0.125 : f32"}],
              operation_attributes: operation_attributes
            } = Lowering.backward(q, k, v, true, 0.125)
@@ -73,7 +73,7 @@ defmodule FlashAttention3.LoweringTest do
     assert sharding_rule =~ "p=64, q=128, r=1}"
     assert sharding_rule =~ "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
 
-    assert %Spec{call_target_name: "exla_fa3_backward_f16"} =
+    assert %Spec{call_target_name: "fa3_backward_f16"} =
              Lowering.backward(
                Nx.template({2, 16, 8, 128}, {:f, 16}),
                Nx.template({2, 16, 2, 128}, {:f, 16}),

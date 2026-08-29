@@ -16,7 +16,7 @@ defmodule FA3TP.IntegrationTest do
 
   # External-library contract exercised by this test:
   #
-  #   * CUDA FFI target: exla_fa3_forward
+  #   * CUDA FFI target: fa3_forward_bf16
   #   * operands: Q/K/V bf16, logical [batch, sequence, heads, dim]
   #   * results: O bf16 [batch, q_sequence, q_heads, value_dim]
   #              LSE f32 [batch, q_heads, q_sequence]
@@ -31,7 +31,7 @@ defmodule FA3TP.IntegrationTest do
     load_external_fa3!()
     hlo_dir = fresh_hlo_dir!()
 
-    target = "exla_fa3_forward"
+    target = "fa3_forward_bf16"
     causal = env_boolean("FA3_TP_CAUSAL", true)
     mesh = %Nx.Mesh{name: "fa3_tp", shape: {2}}
     input_shardings = [%{2 => [0]}, %{2 => [0]}, %{2 => [0]}]
