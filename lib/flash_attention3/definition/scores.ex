@@ -13,6 +13,26 @@ defmodule FlashAttention3.Definition.Scores do
     |> mask(causal, seqlen_q, seqlen_k)
   end
 
+  @doc """
+  Row-stable softmax, returning the probabilities and the log-sum-exp.
+
+  Deliberately not `Nx.logsumexp/2`. That returns only the normalizer, and
+  recovering the probabilities from it costs a second `exp` over the score
+  matrix, which is the largest tensor here. Subtracting the row max once yields
+  both: the probabilities by division, and the normalizer by taking the log of
+  the same denominator and adding the max back.
+  """
+  def normalize(scores) do
+    row_max = Nx.reduce_max(scores, axes: [3], keep_axes: true)
+    exponentials = Nx.exp(Nx.subtract(scores, row_max))
+    denominator = Nx.sum(exponentials, axes: [3], keep_axes: true)
+
+    probabilities = Nx.divide(exponentials, denominator)
+    lse = denominator |> Nx.log() |> Nx.add(row_max) |> Nx.squeeze(axes: [3])
+
+    {probabilities, lse}
+  end
+
   defp mask(scores, false, _seqlen_q, _seqlen_k), do: scores
 
   defp mask(scores, true, seqlen_q, seqlen_k) do
