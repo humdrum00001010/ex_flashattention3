@@ -63,11 +63,14 @@ defmodule FlashAttention3 do
   # Attaches the FA3 backward as the gradient of the output.
   #
   # Nx differentiates a block by re-applying its default implementation and
-  # traversing that, so without this the gradient would be
-  # `DenseAttention`'s: correct, but materializing the score matrix and never
-  # reaching the backward kernel. `custom_grad/3` is a metadata node that grad
-  # short-circuits on, which is how the block's forward substitution and its
-  # gradient are chosen independently.
+  # traversing that, which drops the custom call from the graph entirely --
+  # the forward as well as the backward. `Nx.LinAlg.qr/2` shows the effect:
+  # its forward lowers to a custom call, and its gradient lowers to none,
+  # inlining the Nx implementation instead.
+  #
+  # `custom_grad/3` is a metadata node that grad short-circuits on before it
+  # reaches the block, which is what keeps both calls. Without it, taking a
+  # gradient would silently replace FA3 with dense attention.
   #
   # It has to wrap the block from outside. The closure captures `output` and
   # `lse`, and those become operands of the backward call, so they must be the
