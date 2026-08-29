@@ -1,11 +1,23 @@
 defmodule FlashAttention3.Reference do
   @moduledoc """
-  The portable Nx definition of attention.
+  Attention written in plain Nx, with no kernel.
 
-  This is what `Nx.block/4` runs when no native custom call is selected, and it
-  is also the independent oracle the correctness gate compares the kernel
-  against. It materializes the full score matrix, so it defines the operation
-  but is not a viable implementation at model sequence lengths.
+  `Nx.block/4` requires a default implementation for every block, so this is
+  what the FA3 blocks are defined *as*: when no custom call is selected, this
+  is what EXLA compiles. It therefore serves three roles at once, and they are
+  the same code on purpose.
+
+    * the default callback for `Nx.block/4`, which the API requires
+    * what runs on any client that is not CUDA, which is what the CPU
+      preflight exercises
+    * the independent FP32 oracle the two-GPU correctness gate compares the
+      kernel against
+
+  It materializes the full `{batch, heads, seqlen_q, seqlen_k}` score matrix,
+  which is the allocation FlashAttention exists to avoid. So it defines the
+  operation correctly but is not an implementation you can fall back to at
+  model sequence lengths, and that asymmetry is why an unsupported dtype on
+  CUDA raises rather than landing here.
   """
 
   alias FlashAttention3.Shape
