@@ -1,23 +1,21 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
-  Runs the FA3 custom calls and hides the kernel's scratch buffers.
-
-  XLA has no notion of handler-side scratch, so FA3's working memory has to be
-  declared as extra results of the custom call and dropped again on the way
-  out. Forward returns two results and one scratch buffer; backward returns
-  three and six. Declaring them is mandatory, and dropping them here is what
-  keeps them out of the operation.
-
-  They are results rather than allocated inside the handler because a captured
-  CUDA command buffer needs its buffer addresses fixed at compile time, which
-  is also why their geometry has to be computed in Elixir. Every buffer below
-  is named for its parameter in `native/fa3_xla.cc`.
+  Forward returns output, lse, and one workspace buffer.
+  Backward returns dq, dk, dv and six more.
+  Workspace crosses the boundary because XLA has no handler scratch.
+  It is declared, not allocated: command buffers fix addresses early.
+  The block tuple size must equal the custom call result count.
+  That count must equal the length of `result_layouts`.
+  `Nx.Defn.Expr.block/4` sizes the block from the default's return.
+  It ignores the output template, so pad going in and drop coming out.
+  A mismatch emits a call whose layouts disagree with its results.
+  MLIR then fails to verify it.
+  Buffers are named for their parameters in `native/fa3_xla.cc`.
   """
 
   alias FlashAttention3.{Block, DenseAttention}
 
-  # How many leading results the operation keeps. Everything after them is
-  # scratch.
+  # Leading results the operation keeps. The rest is workspace.
   @forward_results 2
   @backward_results 3
 
@@ -39,7 +37,9 @@ defmodule FlashAttention3.FFI do
     block
     |> struct!(causal: causal, softmax_scale: softmax_scale)
     |> Nx.block([q, k, v], List.to_tuple(results), fn block, q, k, v ->
-      DenseAttention.attention(q, k, v, options(block))
+      q
+      |> DenseAttention.attention(k, v, options(block))
+      |> pad_workspaces(results, @forward_results)
     end)
     |> drop_workspaces(@forward_results)
   end
@@ -91,7 +91,9 @@ defmodule FlashAttention3.FFI do
       [q, k, v, output, lse, doutput],
       List.to_tuple(results),
       fn block, q, k, v, _output, _lse, doutput ->
-        DenseAttention.backward(q, k, v, doutput, options(block))
+        q
+        |> DenseAttention.backward(k, v, doutput, options(block))
+        |> pad_workspaces(results, @backward_results)
       end
     )
     |> drop_workspaces(@backward_results)
@@ -99,6 +101,20 @@ defmodule FlashAttention3.FFI do
 
   defp options(block), do: block |> Map.from_struct() |> Map.to_list()
 
+  # Widens the default's results to the native tuple size.
+  # The zeros are never read: EXLA drops this branch when a spec
+  # is returned, and the kernel writes its own workspace when not.
+  defp pad_workspaces(results, templates, result_count) do
+    workspaces =
+      for template <- Enum.drop(templates, result_count),
+          do: Nx.broadcast(Nx.tensor(0, type: template.type), template.shape)
+
+    (Tuple.to_list(results) ++ workspaces) |> List.to_tuple()
+  end
+
+  # Inverse of pad_workspaces/3.
+  # Takes the leading results, so the handler must declare them first.
+  # XLA still allocates the workspace; this only hides it.
   defp drop_workspaces(native, result_count),
     do: native |> Tuple.to_list() |> Enum.take(result_count) |> List.to_tuple()
 end

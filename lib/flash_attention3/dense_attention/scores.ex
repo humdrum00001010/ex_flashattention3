@@ -43,15 +43,6 @@ defmodule FlashAttention3.DenseAttention.Scores do
 
   defp stop_grad(row_max), do: row_max
 
-  # The row max only shifts the exponent for numerical stability, and its
-  # contribution to the gradient cancels. Differentiating through a
-  # piecewise-constant function is wasted work, so hold it fixed the way
-  # `Nx.logsumexp/2` does. Only expressions carry the annotation.
-  defp stop_grad(%Nx.Tensor{data: %Nx.Defn.Expr{}} = row_max),
-    do: Nx.Defn.Kernel.stop_grad(row_max)
-
-  defp stop_grad(row_max), do: row_max
-
   defp mask(scores, false, _seqlen_q, _seqlen_k), do: scores
 
   defp mask(scores, true, seqlen_q, seqlen_k) do
