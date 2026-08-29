@@ -21,10 +21,11 @@ defmodule FlashAttention3.FFI do
   `FlashAttention3.Kernel.scratch_extents/2` computes them.
   It mirrors the kernel's tiling, pinned to one FA3 commit.
 
-  Block tuple size equals result count equals `result_layouts`.
-  `Nx.Defn.Expr.block/4` sizes the block from the default's return.
+  The block must return one element per custom call result.
+  That count must also equal the entries in `result_layouts`.
+  `Nx.Defn.Expr.block/4` takes it from the default's return.
   It ignores the output template, so the default must be padded.
-  Breaking that equality fails MLIR verification.
+  Breaking that agreement fails MLIR verification.
 
   Buffers are named for the handler parameters they map to.
   """
