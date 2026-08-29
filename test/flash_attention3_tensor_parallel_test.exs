@@ -36,6 +36,14 @@ defmodule FlashAttention3.TensorParallelTest do
     end
   end
 
+  test "TP rejects heads that do not form GQA groups" do
+    r = fn shape -> Nx.iota(shape, type: {:f, 32}) end
+
+    assert_raise ArgumentError, ~r/divisible by kv_heads/, fn ->
+      TensorParallel.shard_inputs(r.({1, 4, 6, 4}), r.({1, 4, 4, 4}), r.({1, 4, 4, 4}), 2)
+    end
+  end
+
   test "the definition's analytic backward matches automatic differentiation" do
     {q, k, v} = fixtures()
     doutput = Nx.iota(q.shape, type: {:f, 32}) |> Nx.remainder(17) |> Nx.divide(19)

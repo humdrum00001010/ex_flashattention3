@@ -18,6 +18,12 @@ defmodule FlashAttention3.TensorParallel do
     q_heads = Nx.axis_size(q, 2)
     kv_heads = Nx.axis_size(k, 2)
 
+    unless rem(q_heads, kv_heads) == 0 do
+      raise ArgumentError,
+            "FA3 GQA requires q_heads to be divisible by kv_heads, got #{q_heads} " <>
+              "and #{kv_heads}"
+    end
+
     unless rem(kv_heads, partitions) == 0 do
       raise ArgumentError,
             "TP must keep complete KV groups: #{kv_heads} KV heads cannot be " <>

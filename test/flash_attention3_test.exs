@@ -59,6 +59,10 @@ defmodule FlashAttention3Test do
       # dimension, so rank-4 validation would pass while XLA emits rank 5.
       vec = &Nx.vectorize(bf16(Tuple.insert_at(&1, 0, 2)), :b)
 
+      assert_raise ArgumentError, ~r/v's head dimension to equal q's/, fn ->
+        FFI.forward(bf16({1, 8, 8, 128}), bf16({1, 8, 2, 128}), bf16({1, 8, 2, 256}), true, 0.1)
+      end
+
       assert_raise ArgumentError, ~r/does not accept vectorized tensors/, fn ->
         FFI.forward(vec.({1, 8, 8, 128}), vec.({1, 8, 2, 128}), vec.({1, 8, 2, 128}), true, 0.125)
       end

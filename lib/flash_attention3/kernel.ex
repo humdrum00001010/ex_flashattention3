@@ -95,6 +95,13 @@ defmodule FlashAttention3.Kernel do
             "FA3 requires k to have q's head dimension, got #{k_head_dim} and #{head_dim}"
     end
 
+    # The kernel indexes V with Q's head dimension, so it admits only square
+    # attention. Rejected here rather than by the handler at execution.
+    unless value_dim == head_dim do
+      raise ArgumentError,
+            "FA3 requires v's head dimension to equal q's, got #{value_dim} and #{head_dim}"
+    end
+
     unless v_seqlen_k == seqlen_k and v_kv_heads == kv_heads do
       raise ArgumentError,
             "FA3 requires v to match k's sequence length and head count, got " <>
