@@ -55,8 +55,30 @@ defmodule FlashAttention3.FFI do
     FlashAttention3.Kernel.backward_operands!(dims, output, lse, doutput, q.type)
     workspace = FlashAttention3.Kernel.workspace(dims, causal)
 
-    # softmax_d and softmax_lse_log2 share a shape; the sequence length is
-    # rounded up to the kernel's query-block size.
+    # FA3's backward is tiled over a grid of query blocks by key blocks, and
+    # every output element is a sum over one of those axes: dQ over all key
+    # blocks, dK and dV over all query blocks. Whichever axis is split across
+    # thread blocks, those partial sums need somewhere global to land before
+    # the result exists, so each gradient gets an accumulator. They are FP32
+    # because summing many partials in bf16 loses the low bits; the cast down
+    # to the operand dtype happens once, at the end, into dq/dk/dv.
+    #
+    # dq_semaphore orders the writes into dq_accum. Its shape is one counter
+    # per query block per head, which is what marks it as ordering between
+    # thread blocks rather than anything XLA can see. None of this is a
+    # collective. The custom call is local to one device, which is what the
+    # Shardy rule's need_replication asserts and what lets tensor parallelism
+    # shard on kv_heads alone; the all-reduce belongs to the output projection
+    # after attention.
+    #
+    # softmax_d carries the row-wise dO . O term the softmax backward needs,
+    # and softmax_lse_log2 is the forward LSE rescaled to base 2. Both are
+    # keyed by the rounded query length because they are indexed per query
+    # block, so they share a shape.
+    #
+    # The tiling described here is FA3's documented structure, not something
+    # read out of the CUTLASS kernel. The shapes and the params wiring in
+    # native/fa3_xla.cc are.
     softmax_stats =
       Nx.template({dims.batch, dims.q_heads, workspace.seqlen_q_rounded}, {:f, 32})
 
