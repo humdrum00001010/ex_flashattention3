@@ -15,6 +15,10 @@ The ownership chain is:
 The implemented native paths are BF16 and FP16 forward/backward for head
 dimensions 128 and 256. FP8 backward is not supported or claimed.
 
+[RESULTS.md](RESULTS.md) records what the kernel measured on two H100s. It is
+kept as evidence of that run and is stale with respect to this tree; the header
+there says what changed under it.
+
 ## Use
 
 ```elixir
