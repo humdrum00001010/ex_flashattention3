@@ -8,7 +8,8 @@ and Nsight evidence.
 
 The ownership chain is:
 
-1. `FA3TP.forward/4` presents the tensor operation and an FP32 Nx fallback.
+1. `FlashAttention3.attention/4` presents the tensor operation and its
+   portable FP32 Nx definition.
 2. `Nx.block/4` preserves that operation as a compiler-visible block.
 3. `EXLA.CustomCall` selects a precision-specific StableHLO custom call and
    attaches row-major layout constraints plus a Shardy rule.
@@ -17,6 +18,28 @@ The ownership chain is:
 
 The implemented native paths are BF16 and FP16 forward/backward for head
 dimensions 128 and 256. FP8 backward is not supported or claimed.
+
+## Use
+
+```elixir
+FlashAttention3.Native.load!()
+
+defn block(q, k, v) do
+  FlashAttention3.attention(q, k, v, causal: true)
+end
+```
+
+Q, K, and V are BSHD `{batch, sequence, heads, dim}`. The result is the
+attention output; `attention_with_lse/4` also returns the FP32 log-sum-exp for
+callers that merge partial results across key/value chunks. Backward runs
+through `Nx.Defn.grad/2` and needs no separate call.
+
+On a CUDA client the operation lowers to `exla_fa3_forward`,
+`exla_fa3_forward_f16`, `exla_fa3_backward`, or `exla_fa3_backward_f16`. An unsupported
+dtype or head dimension is a caller error there rather than a reason to fall
+back, because `FlashAttention3.Reference` materializes the full score matrix
+and is not viable at model sequence lengths. On any other client the operation
+falls back to that definition, which is what the CPU preflight exercises.
 
 ## Layout
 

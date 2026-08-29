@@ -1,258 +1,88 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
-  XLA FFI contract implemented by the native FlashAttention-3 library.
+  Owns the complete native result contract for the FA3 custom calls.
 
-  Each call describes both the StableHLO custom-call metadata and the complete
-  native result tuple. Model code does not call this module directly; the Nx
-  block adapter uses it to keep handler symbols, layouts, Shardy rules, and
-  compiler-owned workspaces behind one boundary.
+  The kernel returns compiler-owned workspaces alongside its semantic results.
+  Those workspaces exist only because a captured CUDA command buffer needs
+  stable buffers, so they are packed and dropped here and never reach the
+  operation. Model code uses `FlashAttention3` instead of this module.
   """
 
-  alias EXLA.CustomCall.Spec
-
-  @enforce_keys [:platform, :operands, :spec, :outputs, :semantic_result_count]
-  defstruct [:platform, :operands, :spec, :outputs, :semantic_result_count]
-
-  @type t :: %__MODULE__{
-          platform: :cuda,
-          operands: [Nx.Tensor.t()],
-          spec: Spec.t() | nil,
-          outputs: tuple(),
-          semantic_result_count: pos_integer()
-        }
-
-  @forward_target "exla_fa3_forward"
-  @backward_target "exla_fa3_backward"
-  @row_major_4d "dense<[3, 2, 1, 0]> : tensor<4xindex>"
-  @row_major_3d "dense<[2, 1, 0]> : tensor<3xindex>"
+  alias FlashAttention3.{Block, Reference, Shape}
 
   @doc """
-  Builds the native forward contract for BSHD Q, K, and V tensors.
-
-  The result tuple is output, FP32 LSE, and an S32 scheduler workspace.
+  Runs the forward custom call and returns `{output, lse}`.
   """
-  @spec forward(Nx.Tensor.t(), Nx.Tensor.t(), Nx.Tensor.t(), boolean(), number()) :: t()
-  def forward(%Nx.Tensor{} = q, %Nx.Tensor{} = k, %Nx.Tensor{} = v, causal, softmax_scale)
-      when is_boolean(causal) and is_number(softmax_scale) do
-    {batch, seqlen_q, q_heads, head_dim, seqlen_k, kv_heads, value_dim} =
-      qkv_shape!(q, k, v, causal)
+  def forward(q, k, v, causal, softmax_scale, block \\ Block.Forward) do
+    dims = Shape.attention!(q, k, v, causal)
 
-    spec =
-      if custom_call_dtype?(q.type) do
-        groups = div(q_heads, kv_heads)
+    results = [
+      Nx.template({dims.batch, dims.seqlen_q, dims.q_heads, dims.value_dim}, q.type),
+      Nx.template({dims.batch, dims.q_heads, dims.seqlen_q}, {:f, 32}),
+      Nx.template({dims.batch}, {:s, 32})
+    ]
 
-        sharding_rule =
-          "#sdy.op_sharding_rule<" <>
-            "([i, j, lm, n], [i, k, m, n], [i, k, m, o])->" <>
-            "([i, j, lm, o], [i, lm, j], [i]) " <>
-            "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
-            "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}} " <>
-            "need_replication={i, j, k, l, n, o}, custom>"
-
-        %Spec{
-          call_target_name: precision_target!(@forward_target, q.type),
-          attributes: handler_attributes(causal, softmax_scale),
-          operation_attributes: [
-            {"operand_layouts", "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}]"},
-            {"result_layouts",
-             "[#{@row_major_4d}, dense<[2, 1, 0]> : tensor<3xindex>, " <>
-               "dense<[0]> : tensor<1xindex>]"},
-            {"sdy.sharding_rule", sharding_rule}
-          ]
-        }
-      end
-
-    outputs = {
-      Nx.template({batch, seqlen_q, q_heads, value_dim}, q.type),
-      Nx.template({batch, q_heads, seqlen_q}, {:f, 32}),
-      Nx.template({batch}, {:s, 32})
-    }
-
-    %__MODULE__{
-      platform: :cuda,
-      operands: [q, k, v],
-      spec: spec,
-      outputs: outputs,
-      semantic_result_count: 2
-    }
+    block
+    |> struct!(causal: causal, softmax_scale: softmax_scale)
+    |> Nx.block([q, k, v], List.to_tuple(results), fn block, q, k, v ->
+      pack(Reference.attention(q, k, v, options(block)), results, 2)
+    end)
+    |> unpack(2)
   end
 
   @doc """
-  Builds the native backward contract for BSHD Q, K, and V tensors.
-
-  Backward consumes Q, K, V, output, FP32 LSE, and dOutput. Its result tuple is
-  dQ, dK, dV, followed by six compiler-owned workspaces.
+  Runs the backward custom call and returns `{dq, dk, dv}`.
   """
-  @spec backward(
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          Nx.Tensor.t(),
-          boolean(),
-          number()
-        ) :: t()
-  def backward(
-        %Nx.Tensor{} = q,
-        %Nx.Tensor{} = k,
-        %Nx.Tensor{} = v,
-        %Nx.Tensor{} = output,
-        %Nx.Tensor{} = lse,
-        %Nx.Tensor{} = doutput,
-        causal,
-        softmax_scale
-      )
-      when is_boolean(causal) and is_number(softmax_scale) do
-    {batch, seqlen_q, q_heads, head_dim, seqlen_k, kv_heads, value_dim} =
-      qkv_shape!(q, k, v, causal)
+  def backward(q, k, v, output, lse, doutput, causal, softmax_scale, block \\ Block.Backward) do
+    dims = Shape.attention!(q, k, v, causal)
+    Shape.backward!(dims, output, lse, doutput, q.type)
+    workspace = Shape.workspace(dims, causal)
 
-    output_shape = {batch, seqlen_q, q_heads, value_dim}
+    softmax = Nx.template({dims.batch, dims.q_heads, workspace.seqlen_q_rounded}, {:f, 32})
 
-    unless output.shape == output_shape and output.type == q.type and
-             lse.shape == {batch, q_heads, seqlen_q} and lse.type == {:f, 32} and
-             doutput.shape == output_shape and doutput.type == q.type do
-      raise ArgumentError,
-            "FA3 backward FFI requires O/dO to match the output and FP32 LSE in BHQ order"
-    end
-
-    k_block_m = if head_dim <= 128, do: if(causal, do: 64, else: 80), else: 64
-    k_block_n = if head_dim <= 128, do: 128, else: 80
-    seqlen_q_rounded = round_up(seqlen_q, k_block_m)
-    seqlen_k_rounded = round_up(seqlen_k, k_block_n)
-    q_blocks = div(seqlen_q_rounded, k_block_m)
-
-    spec =
-      if custom_call_dtype?(q.type) do
-        groups = div(q_heads, kv_heads)
-
-        sharding_rule =
-          "#sdy.op_sharding_rule<" <>
-            "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
-            "[i, j, lm, o], [i, lm, j], [i, j, lm, o])->" <>
-            "([i, j, lm, n], [i, k, m, n], [i, k, m, o], " <>
-            "[i, lm, p], [i, lm, p], [i, lm, p, n], [r, i, lm], " <>
-            "[i, m, q, n], [i, m, q, o]) " <>
-            "{i=#{batch}, j=#{seqlen_q}, k=#{seqlen_k}, l=#{groups}, " <>
-            "m=#{kv_heads}, n=#{head_dim}, o=#{value_dim}, " <>
-            "p=#{seqlen_q_rounded}, q=#{seqlen_k_rounded}, r=#{q_blocks}} " <>
-            "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
-
-        %Spec{
-          call_target_name: precision_target!(@backward_target, q.type),
-          attributes: handler_attributes(causal, softmax_scale),
-          operation_attributes: [
-            {"operand_layouts",
-             "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}, " <>
-               "#{@row_major_4d}, #{@row_major_3d}, #{@row_major_4d}]"},
-            {"result_layouts",
-             "[#{@row_major_4d}, #{@row_major_4d}, #{@row_major_4d}, " <>
-               "#{@row_major_3d}, #{@row_major_3d}, #{@row_major_4d}, " <>
-               "#{@row_major_3d}, #{@row_major_4d}, #{@row_major_4d}]"},
-            {"sdy.sharding_rule", sharding_rule}
-          ]
-        }
-      end
-
-    softmax_shape = {batch, q_heads, seqlen_q_rounded}
-
-    outputs = {
+    results = [
       Nx.template(q.shape, q.type),
       Nx.template(k.shape, k.type),
       Nx.template(v.shape, v.type),
-      Nx.template(softmax_shape, {:f, 32}),
-      Nx.template(softmax_shape, {:f, 32}),
-      Nx.template({batch, q_heads, seqlen_q_rounded, head_dim}, {:f, 32}),
-      Nx.template({q_blocks, batch, q_heads}, {:s, 32}),
-      Nx.template({batch, kv_heads, seqlen_k_rounded, head_dim}, {:f, 32}),
-      Nx.template({batch, kv_heads, seqlen_k_rounded, value_dim}, {:f, 32})
-    }
-
-    %__MODULE__{
-      platform: :cuda,
-      operands: [q, k, v, output, lse, doutput],
-      spec: spec,
-      outputs: outputs,
-      semantic_result_count: 3
-    }
-  end
-
-  @doc false
-  def pack_results(
-        %__MODULE__{outputs: outputs, semantic_result_count: count},
-        semantic_results
+      softmax,
+      softmax,
+      Nx.template(
+        {dims.batch, dims.q_heads, workspace.seqlen_q_rounded, dims.head_dim},
+        {:f, 32}
+      ),
+      Nx.template({workspace.q_blocks, dims.batch, dims.q_heads}, {:s, 32}),
+      Nx.template(
+        {dims.batch, dims.kv_heads, workspace.seqlen_k_rounded, dims.head_dim},
+        {:f, 32}
+      ),
+      Nx.template(
+        {dims.batch, dims.kv_heads, workspace.seqlen_k_rounded, dims.value_dim},
+        {:f, 32}
       )
-      when is_tuple(semantic_results) and tuple_size(semantic_results) == count do
-    workspaces =
-      outputs
-      |> Tuple.to_list()
-      |> Enum.drop(count)
-      |> Enum.map(&zero_template/1)
-
-    semantic_results
-    |> Tuple.to_list()
-    |> Kernel.++(workspaces)
-    |> List.to_tuple()
-  end
-
-  @doc false
-  def semantic_results(
-        %__MODULE__{outputs: outputs, semantic_result_count: count},
-        native_results
-      )
-      when is_tuple(native_results) and tuple_size(native_results) == tuple_size(outputs) do
-    native_results
-    |> Tuple.to_list()
-    |> Enum.take(count)
-    |> List.to_tuple()
-  end
-
-  defp qkv_shape!(q, k, v, causal) do
-    {batch, seqlen_q, q_heads, head_dim} = rank4_shape!(q, "q")
-    {^batch, seqlen_k, kv_heads, ^head_dim} = rank4_shape!(k, "k")
-    {^batch, ^seqlen_k, ^kv_heads, value_dim} = rank4_shape!(v, "v")
-
-    unless q.type == k.type and q.type == v.type do
-      raise ArgumentError, "FA3 FFI requires Q, K, and V to use one dtype"
-    end
-
-    unless rem(q_heads, kv_heads) == 0 do
-      raise ArgumentError, "FA3 FFI requires complete GQA groups"
-    end
-
-    if causal and seqlen_q != seqlen_k do
-      raise ArgumentError, "causal FA3 FFI requires equal Q and K sequence lengths"
-    end
-
-    {batch, seqlen_q, q_heads, head_dim, seqlen_k, kv_heads, value_dim}
-  end
-
-  defp handler_attributes(causal, softmax_scale) do
-    [
-      {"causal", to_string(causal)},
-      {"softmax_scale", "#{softmax_scale} : f32"}
     ]
+
+    block
+    |> struct!(causal: causal, softmax_scale: softmax_scale)
+    |> Nx.block(
+      [q, k, v, output, lse, doutput],
+      List.to_tuple(results),
+      fn block, q, k, v, _output, _lse, doutput ->
+        pack(Reference.backward(q, k, v, doutput, options(block)), results, 3)
+      end
+    )
+    |> unpack(3)
   end
 
-  defp custom_call_dtype?(type), do: type in [{:bf, 16}, {:f, 16}]
+  defp options(block), do: block |> Map.from_struct() |> Map.to_list()
 
-  defp precision_target!(base, {:bf, 16}), do: base
-  defp precision_target!(base, {:f, 16}), do: base <> "_f16"
+  defp pack(semantic, results, count) do
+    workspaces =
+      for template <- Enum.drop(results, count),
+          do: Nx.broadcast(Nx.tensor(0, type: template.type), template.shape)
 
-  defp precision_target!(_base, type) do
-    raise ArgumentError, "FA3 FFI supports BF16 and FP16, got: #{inspect(type)}"
+    (Tuple.to_list(semantic) ++ workspaces) |> List.to_tuple()
   end
 
-  defp rank4_shape!(%Nx.Tensor{shape: {a, b, c, d}}, _name), do: {a, b, c, d}
-
-  defp rank4_shape!(%Nx.Tensor{shape: shape}, name) do
-    raise ArgumentError,
-          "#{name} must have shape {batch, sequence, heads, dim}, got #{inspect(shape)}"
-  end
-
-  defp round_up(value, block), do: div(value + block - 1, block) * block
-
-  defp zero_template(%Nx.Tensor{shape: shape, type: type}) do
-    Nx.broadcast(Nx.tensor(0, type: type), shape)
-  end
+  defp unpack(native, count),
+    do: native |> Tuple.to_list() |> Enum.take(count) |> List.to_tuple()
 end

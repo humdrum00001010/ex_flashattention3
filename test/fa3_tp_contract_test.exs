@@ -169,49 +169,39 @@ defmodule FA3TP.ContractTest do
   defp host_forward(q, k, v, causal) do
     {_batch, _sequence, _heads, head_dim} = q.shape
     softmax_scale = 1.0 / :math.sqrt(head_dim)
-    ffi = FFI.forward(q, k, v, causal, softmax_scale)
-    block = %HostTestBlock{spec: ffi.spec}
 
-    native_results =
-      Nx.block(block, ffi.operands, ffi.outputs, fn _block, q, k, v ->
-        {output, lse} =
-          FA3TP.reference(q, k, v, causal: causal, softmax_scale: softmax_scale)
-
-        FFI.pack_results(ffi, {output, lse})
-      end)
-
-    result = {output, lse} = FFI.semantic_results(ffi, native_results)
+    {output, lse} = FFI.forward(q, k, v, causal, softmax_scale, HostTestBlock.Forward)
 
     case q.data do
       %Nx.Defn.Expr{} ->
-        custom_grad(result, [q, k, v], fn {doutput, _dlse} ->
-          doutput = Nx.as_type(doutput, q.type)
+        graded =
+          custom_grad(output, [q, k, v], fn doutput ->
+            doutput = Nx.as_type(doutput, q.type)
 
-          host_backward(q, k, v, output, lse, doutput, causal, softmax_scale)
-          |> Tuple.to_list()
-        end)
+            q
+            |> host_backward(k, v, output, lse, doutput, causal, softmax_scale)
+            |> Tuple.to_list()
+          end)
+
+        {graded, lse}
 
       _ ->
-        result
+        {output, lse}
     end
   end
 
   defp host_backward(q, k, v, output, lse, doutput, causal, softmax_scale) do
-    ffi = FFI.backward(q, k, v, output, lse, doutput, causal, softmax_scale)
-    block = %HostTestBlock{spec: ffi.spec}
-
-    native_results =
-      Nx.block(block, ffi.operands, ffi.outputs, fn _block, q, k, v, _output, _lse, doutput ->
-        {dq, dk, dv} =
-          FA3TP.reference_backward(q, k, v, doutput,
-            causal: causal,
-            softmax_scale: softmax_scale
-          )
-
-        FFI.pack_results(ffi, {dq, dk, dv})
-      end)
-
-    FFI.semantic_results(ffi, native_results)
+    FFI.backward(
+      q,
+      k,
+      v,
+      output,
+      lse,
+      doutput,
+      causal,
+      softmax_scale,
+      HostTestBlock.Backward
+    )
   end
 
   defp assert_all_close(left, right, opts) do

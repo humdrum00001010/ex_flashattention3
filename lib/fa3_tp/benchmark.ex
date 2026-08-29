@@ -12,10 +12,7 @@ defmodule FA3TP.Benchmark do
 
     {output, _k, _v} =
       while {output = q, k, v}, _i <- 1..opts[:chain_length], unroll: true do
-        {output, _lse} =
-          forward(output, k, v, causal: opts[:causal])
-
-        {output, k, v}
+        {FlashAttention3.attention(output, k, v, causal: opts[:causal]), k, v}
       end
 
     output
@@ -32,19 +29,15 @@ defmodule FA3TP.Benchmark do
       while {q, k, v, doutput}, _i <- 1..opts[:chain_length], unroll: true do
         {dq, dk, dv} =
           grad({q, k, v}, fn {q, k, v} ->
-            {output, _lse} =
-              forward(q, k, v, causal: opts[:causal])
-
-            output |> Nx.multiply(doutput) |> Nx.sum()
+            q
+            |> FlashAttention3.attention(k, v, causal: opts[:causal])
+            |> Nx.multiply(doutput)
+            |> Nx.sum()
           end)
 
         {dq, dk, dv, doutput}
       end
 
     {q, k, v}
-  end
-
-  deftransformp forward(q, k, v, opts) do
-    FA3TP.forward(q, k, v, opts)
   end
 end
