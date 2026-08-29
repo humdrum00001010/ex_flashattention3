@@ -1,13 +1,13 @@
 defmodule FlashAttention3.FFI do
   @moduledoc """
-  Forward returns output, lse, and one workspace buffer.
-  Backward returns dq, dk, dv and six more.
+  Native results are the operation's results followed by workspace.
+  This module widens the default to that shape and narrows it back.
   Workspace crosses the boundary because XLA has no handler scratch.
   It is declared, not allocated: command buffers fix addresses early.
   The block tuple size must equal the custom call result count.
   That count must equal the length of `result_layouts`.
   `Nx.Defn.Expr.block/4` sizes the block from the default's return.
-  It ignores the output template, so pad going in and drop coming out.
+  It ignores the output template, so the default must be padded.
   A mismatch emits a call whose layouts disagree with its results.
   MLIR then fails to verify it.
   Buffers are named for their parameters in `native/fa3_xla.cc`.
@@ -20,7 +20,8 @@ defmodule FlashAttention3.FFI do
   @backward_results 3
 
   @doc """
-  Runs the forward custom call and returns `{output, lse}`.
+  Runs the forward custom call.
+  Returns `{output, lse}`; the call also declares one workspace buffer.
   """
   def forward(q, k, v, causal, softmax_scale, block \\ Block.Forward) do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
@@ -45,7 +46,8 @@ defmodule FlashAttention3.FFI do
   end
 
   @doc """
-  Runs the backward custom call and returns `{dq, dk, dv}`.
+  Runs the backward custom call.
+  Returns `{dq, dk, dv}`; the call declares six workspace buffers.
   """
   def backward(q, k, v, output, lse, doutput, causal, softmax_scale, block \\ Block.Backward) do
     dims = FlashAttention3.Kernel.dims!(q, k, v, causal)
