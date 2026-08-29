@@ -60,10 +60,23 @@ defmodule FlashAttention3 do
     |> attach_grad(q, k, v, causal, softmax_scale)
   end
 
-  # Attaches the FA3 backward as the gradient of the output. `custom_grad/3`
-  # and `stop_grad/1` annotate expressions, so an eager call has nothing to
-  # annotate and passes through; its gradient, if taken at all, comes from
-  # differentiating `DenseAttention` directly.
+  # Attaches the FA3 backward as the gradient of the output.
+  #
+  # Nx differentiates a block by re-applying its default implementation and
+  # traversing that, so without this the gradient would be
+  # `DenseAttention`'s: correct, but materializing the score matrix and never
+  # reaching the backward kernel. `custom_grad/3` is a metadata node that grad
+  # short-circuits on, which is how the block's forward substitution and its
+  # gradient are chosen independently.
+  #
+  # It has to wrap the block from outside. The closure captures `output` and
+  # `lse`, and those become operands of the backward call, so they must be the
+  # ones the custom call produces. Moved inside the default callback it would
+  # capture the dense expressions instead, and XLA would have to materialize a
+  # full dense forward just to feed backward.
+  #
+  # `custom_grad/3` and `stop_grad/1` annotate expressions, so an eager call
+  # has nothing to annotate and passes through.
   defp attach_grad({output, lse}, %{data: %Nx.Defn.Expr{}} = q, k, v, causal, softmax_scale) do
     graded =
       custom_grad(output, [q, k, v], fn doutput ->
