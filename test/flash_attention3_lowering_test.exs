@@ -6,16 +6,33 @@ defmodule FlashAttention3.LoweringTest do
 
   defp bf16(shape), do: Nx.template(shape, {:bf, 16})
 
-  test "forward selects the precision target and describes the operation" do
-    q = bf16({2, 16, 8, 128})
-    k = bf16({2, 16, 2, 128})
-    v = bf16({2, 16, 2, 128})
+  defp forward_operands(type) do
+    [
+      Nx.template({2, 16, 8, 128}, type),
+      Nx.template({2, 16, 2, 128}, type),
+      Nx.template({2, 16, 2, 128}, type)
+    ]
+  end
 
+  defp backward_operands(type) do
+    [q, k, v] = forward_operands(type)
+
+    [
+      q,
+      k,
+      v,
+      Nx.template({2, 16, 8, 128}, type),
+      Nx.template({2, 8, 16}, {:f, 32}),
+      Nx.template({2, 16, 8, 128}, type)
+    ]
+  end
+
+  test "forward selects the precision target and describes the operation" do
     assert %Spec{
              call_target_name: "fa3_forward_bf16",
              attributes: [{"causal", "true"}, {"softmax_scale", "0.125 : f32"}],
              operation_attributes: operation_attributes
-           } = Lowering.forward(q, k, v, true, 0.125)
+           } = Lowering.forward(forward_operands({:bf, 16}), true, 0.125)
 
     assert {"operand_layouts",
             "[dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
@@ -36,25 +53,15 @@ defmodule FlashAttention3.LoweringTest do
     assert sharding_rule =~ "need_replication={i, j, k, l, n, o}, custom>"
 
     assert %Spec{call_target_name: "fa3_forward_f16"} =
-             Lowering.forward(
-               Nx.template({2, 16, 8, 128}, {:f, 16}),
-               Nx.template({2, 16, 2, 128}, {:f, 16}),
-               Nx.template({2, 16, 2, 128}, {:f, 16}),
-               false,
-               0.125
-             )
+             Lowering.forward(forward_operands({:f, 16}), false, 0.125)
   end
 
   test "backward describes six operands and nine results" do
-    q = bf16({2, 16, 8, 128})
-    k = bf16({2, 16, 2, 128})
-    v = bf16({2, 16, 2, 128})
-
     assert %Spec{
              call_target_name: "fa3_backward_bf16",
              attributes: [{"causal", "true"}, {"softmax_scale", "0.125 : f32"}],
              operation_attributes: operation_attributes
-           } = Lowering.backward(q, k, v, true, 0.125)
+           } = Lowering.backward(backward_operands({:bf, 16}), true, 0.125)
 
     assert {"operand_layouts", operand_layouts} =
              List.keyfind(operation_attributes, "operand_layouts", 0)
@@ -74,30 +81,24 @@ defmodule FlashAttention3.LoweringTest do
     assert sharding_rule =~ "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
 
     assert %Spec{call_target_name: "fa3_backward_f16"} =
-             Lowering.backward(
-               Nx.template({2, 16, 8, 128}, {:f, 16}),
-               Nx.template({2, 16, 2, 128}, {:f, 16}),
-               Nx.template({2, 16, 2, 128}, {:f, 16}),
-               false,
-               0.125
-             )
+             Lowering.backward(backward_operands({:f, 16}), false, 0.125)
   end
 
   test "the kernel's dtype and head dimension limits are caller errors" do
-    f32 = fn shape -> Nx.template(shape, {:f, 32}) end
-
     assert_raise ArgumentError, ~r/supports BF16 and FP16/, fn ->
-      Lowering.forward(
-        f32.({1, 8, 8, 128}),
-        f32.({1, 8, 2, 128}),
-        f32.({1, 8, 2, 128}),
-        true,
-        0.5
-      )
+      Lowering.forward(forward_operands({:f, 32}), true, 0.5)
     end
 
     assert_raise ArgumentError, ~r/supports head dimensions \[128, 256\]/, fn ->
-      Lowering.forward(bf16({1, 8, 8, 64}), bf16({1, 8, 2, 64}), bf16({1, 8, 2, 64}), true, 0.125)
+      Lowering.forward(
+        [bf16({1, 8, 8, 64}), bf16({1, 8, 2, 64}), bf16({1, 8, 2, 64})],
+        true,
+        0.125
+      )
+    end
+
+    assert_raise ArgumentError, ~r/supports BF16 and FP16/, fn ->
+      Lowering.backward(backward_operands({:f, 32}), true, 0.5)
     end
 
     refute Lowering.supported?({:f, 32}, 128)
