@@ -3,9 +3,6 @@
 This is an executable boundary test for FlashAttention-3 under Nx/EXLA
 `shard_jit`. It is intentionally not an `Nx` primitive.
 
-See [RESULTS.md](RESULTS.md) for the exact two-H100 correctness, benchmark,
-and Nsight evidence.
-
 The ownership chain is:
 
 1. `FlashAttention3.attention/4` presents the tensor operation.
@@ -125,47 +122,3 @@ The gate requires, in order:
 - an output-projection all-reduce after attention;
 - BF16 and FP16 single-GPU plus TP2 forward/backward gradients;
 - resident sharded-buffer reentry, with no hidden host staging.
-
-## Performance
-
-Default shape: causal `{4, 2048, 24, 4, 256}`. Throughput includes device
-completion and one PjRt boundary per compiled chain.
-
-| Precision | Operation | 1 GPU PFLOP/s | TP2 PFLOP/s (range) | TP2 scaling |
-| --- | --- | ---: | ---: | ---: |
-| BF16 | Forward | 0.71013 | 1.37167 (1.33706-1.39267) | 1.932x |
-| BF16 | Forward+backward | 0.34011 | 0.65769 (0.65539-0.65940) | 1.934x |
-| FP16 | Forward | 0.67875 | 1.27962 (1.27062-1.32992) | 1.885x |
-| FP16 | Forward+backward | 0.33967 | 0.65293 (0.64428-0.65551) | 1.922x |
-
-These are the fresh-image chain-64 medians; ranges are slow-to-fast throughput
-from the timing p90 and p10 samples. BF16 TP2 forward at chain 512 measured
-1.40401 PFLOP/s over 20 samples and 1.40032 PFLOP/s over a 50-sample repeat,
-or 98.87% and 98.61% of the 1.42 PFLOP/s target. An earlier 1.41490 PFLOP/s
-run was not reproduced on the fresh instance.
-
-The chain-512 HLO contains 512 FA3 calls and lowers to one command buffer with
-512 custom-call thunks. A short Nsight trace placed the kernel-only equivalent
-throughput at 1.400-1.422 PFLOP/s; the amortized EXLA/PjRt boundary is therefore
-not the steady-state bottleneck. See [RESULTS.md](RESULTS.md) for the breakdown.
-
-The resident-input benchmark needs EXLA's sharded-buffer re-entry behavior in
-addition to `EXLA.CustomCall.Spec.operation_attributes`. They are independent
-changes; the operation-attributes change alone does not fix buffer placement.
-
-Run the full forward/backward benchmark:
-
-```sh
-FA3_TP_BENCHMARK=1 \
-mix test test/fa3_tp_integration_test.exs --include integration
-```
-
-Run the BF16 saturation probe:
-
-```sh
-FA3_TP_BENCHMARK=1 FA3_TP_PRECISION=bf16 FA3_TP_FORWARD_ONLY=1 \
-FA3_TP_CHAIN_LENGTH=512 FA3_TP_WARMUP=5 FA3_TP_ITERATIONS=20 \
-mix test test/fa3_tp_integration_test.exs --include integration
-```
-
-See [RESULTS.md](RESULTS.md) for scaling, proof, and hashes.

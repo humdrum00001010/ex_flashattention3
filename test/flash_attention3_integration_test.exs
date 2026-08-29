@@ -12,7 +12,6 @@ defmodule FlashAttention3.IntegrationTest do
   #   XLA_FLAGS="--xla_dump_to=/fresh/hlo/directory --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout" \
   #   mix test test/fa3_tp_integration_test.exs --include integration
   #
-  # Add FA3_TP_BENCHMARK=1 only after the correctness and reentry gates pass.
 
   # External-library contract exercised by this test:
   #
@@ -23,7 +22,7 @@ defmodule FlashAttention3.IntegrationTest do
   #   * backend_config attrs: causal: bool, softmax_scale: f32
   #   * the dylib also registers the target's CustomCallPartitioner
 
-  test "single-device correctness -> TP correctness -> resident reentry -> benchmark" do
+  test "single-device correctness -> TP correctness -> resident reentry" do
     client = EXLA.Client.fetch!(:cuda)
     assert client.device_count >= 2, "FA3 TP2 requires two physical CUDA devices"
     assert_hopper_topology!()
@@ -165,10 +164,6 @@ defmodule FlashAttention3.IntegrationTest do
       resident_result |> Enum.map(&to_host/1) |> FlashAttention3.TensorParallel.assemble_outputs()
 
     assert_matches_oracle!(resident_assembled, {q_f32, k_f32, v_f32}, {q, k, v}, causal)
-
-    if env_boolean("FA3_TP_BENCHMARK", false) do
-      benchmark!(causal, mesh, input_shardings)
-    end
   end
 
   defp load_external_fa3! do
@@ -444,315 +439,12 @@ defmodule FlashAttention3.IntegrationTest do
 
   defp to_host(value), do: Nx.backend_copy(value, Nx.BinaryBackend)
 
-  defp benchmark!(causal, mesh, input_shardings) do
-    batch = env_integer("FA3_TP_BATCH", 4)
-    seqlen = env_integer("FA3_TP_SEQLEN", 2048)
-    q_heads = env_integer("FA3_TP_Q_HEADS", 24)
-    kv_heads = env_integer("FA3_TP_KV_HEADS", 4)
-    dim = env_integer("FA3_TP_HEAD_DIM", 256)
-    chain_length = env_integer("FA3_TP_CHAIN_LENGTH", 64)
-    warmup = env_integer("FA3_TP_WARMUP", 3)
-    iterations = env_integer("FA3_TP_ITERATIONS", 10)
-    calls_per_sample = env_integer("FA3_TP_CALLS_PER_SAMPLE", 1)
-
-    for {precision, type} <- benchmark_precisions() do
-      args = [
-        precision,
-        type,
-        {batch, seqlen, q_heads, kv_heads, dim},
-        causal,
-        mesh,
-        input_shardings,
-        chain_length,
-        warmup,
-        iterations,
-        calls_per_sample
-      ]
-
-      benchmark =
-        if env_boolean("FA3_TP_FORWARD_ONLY", false),
-          do: &benchmark_forward_only!/10,
-          else: &benchmark_precision!/10
-
-      apply(benchmark, args)
-    end
-  end
-
-  defp benchmark_forward_only!(
-         precision,
-         type,
-         {batch, seqlen, q_heads, kv_heads, dim},
-         causal,
-         mesh,
-         input_shardings,
-         chain_length,
-         warmup,
-         iterations,
-         calls_per_sample
-       ) do
-    q = Nx.broadcast(Nx.tensor(0.01, type: type), {batch, seqlen, q_heads, dim})
-    k = Nx.broadcast(Nx.tensor(0.02, type: type), {batch, seqlen, kv_heads, dim})
-    v = Nx.broadcast(Nx.tensor(0.03, type: type), {batch, seqlen, kv_heads, dim})
-
-    chain_opts = [
-      chain_length: chain_length,
-      causal: causal
-    ]
-
-    forward_chain = fn q, k, v ->
-      FlashAttention3.Benchmark.forward_chain(q, k, v, chain_opts)
-    end
-
-    single_args =
-      EXLA.jit(fn q, k, v -> {q, k, v} end, client: :cuda).(q, k, v)
-      |> Tuple.to_list()
-
-    host_shards = FlashAttention3.TensorParallel.shard_inputs(q, k, v, 2)
-
-    tp_args =
-      EXLA.shard_jit(fn q, k, v -> {q, k, v} end, mesh,
-        client: :cuda,
-        input_shardings: input_shardings
-      ).(host_shards)
-      |> Enum.map(&Tuple.to_list/1)
-
-    single_forward = EXLA.jit(forward_chain, client: :cuda)
-
-    tp_forward =
-      EXLA.shard_jit(forward_chain, mesh,
-        client: :cuda,
-        input_shardings: input_shardings
-      )
-
-    single_stats =
-      measure(single_forward, single_args, warmup, iterations, calls_per_sample, chain_length)
-
-    tp_stats =
-      measure(tp_forward, [tp_args], warmup, iterations, calls_per_sample, chain_length)
-
-    forward_flops =
-      4.0 * batch * q_heads * seqlen * seqlen * dim * if(causal, do: 0.5, else: 1.0)
-
-    IO.puts("""
-    FA3_TP_RESULT precision=#{precision} global_shape={#{batch},#{seqlen},#{q_heads},#{kv_heads},#{dim}} chain_length=#{chain_length} warmup=#{warmup} samples=#{iterations} calls_per_sample=#{calls_per_sample} forward_only=true
-    single_forward_logical_pflops=#{forward_flops / single_stats.median / 1.0e9}
-    tp2_forward_logical_pflops=#{forward_flops / tp_stats.median / 1.0e9}
-    tp2_forward_throughput_scaling=#{single_stats.median / tp_stats.median}
-    single_forward_median_us=#{single_stats.median} p10_us=#{single_stats.p10} p90_us=#{single_stats.p90}
-    tp2_forward_median_us=#{tp_stats.median} p10_us=#{tp_stats.p10} p90_us=#{tp_stats.p90}
-    """)
-
-    deallocate_result(single_args)
-    deallocate_result(tp_args)
-  end
-
-  defp benchmark_precision!(
-         precision,
-         type,
-         {batch, seqlen, q_heads, kv_heads, dim},
-         causal,
-         mesh,
-         input_shardings,
-         chain_length,
-         warmup,
-         iterations,
-         calls_per_sample
-       ) do
-    q = Nx.broadcast(Nx.tensor(0.01, type: type), {batch, seqlen, q_heads, dim})
-    k = Nx.broadcast(Nx.tensor(0.02, type: type), {batch, seqlen, kv_heads, dim})
-    v = Nx.broadcast(Nx.tensor(0.03, type: type), {batch, seqlen, kv_heads, dim})
-    doutput = Nx.broadcast(Nx.tensor(0.04, type: type), q.shape)
-
-    chain_opts = [
-      chain_length: chain_length,
-      causal: causal
-    ]
-
-    forward_chain = fn q, k, v ->
-      FlashAttention3.Benchmark.forward_chain(q, k, v, chain_opts)
-    end
-
-    forward_backward_chain = fn q, k, v, doutput ->
-      FlashAttention3.Benchmark.forward_backward_chain(q, k, v, doutput, chain_opts)
-    end
-
-    stage_single = EXLA.jit(fn q, k, v, doutput -> {q, k, v, doutput} end, client: :cuda)
-    single_gradient_args = stage_single.(q, k, v, doutput) |> Tuple.to_list()
-    single_forward_args = Enum.take(single_gradient_args, 3)
-    single_forward = EXLA.jit(forward_chain, client: :cuda)
-    single_forward_backward = EXLA.jit(forward_backward_chain, client: :cuda)
-
-    qkv_shards = FlashAttention3.TensorParallel.shard_inputs(q, k, v, 2)
-    q_heads_per_rank = div(q_heads, 2)
-
-    host_gradient_shards =
-      qkv_shards
-      |> Enum.with_index()
-      |> Enum.map(fn {qkv, rank} ->
-        qkv ++
-          [
-            Nx.slice_along_axis(
-              doutput,
-              rank * q_heads_per_rank,
-              q_heads_per_rank,
-              axis: 2
-            )
-          ]
-      end)
-
-    stage_tp =
-      EXLA.shard_jit(fn q, k, v, doutput -> {q, k, v, doutput} end, mesh,
-        client: :cuda,
-        input_shardings: input_shardings ++ [%{2 => [0]}]
-      )
-
-    tp_gradient_args = stage_tp.(host_gradient_shards) |> Enum.map(&Tuple.to_list/1)
-    tp_forward_args = Enum.map(tp_gradient_args, &Enum.take(&1, 3))
-
-    tp_forward =
-      EXLA.shard_jit(forward_chain, mesh,
-        client: :cuda,
-        input_shardings: input_shardings
-      )
-
-    tp_forward_backward =
-      EXLA.shard_jit(forward_backward_chain, mesh,
-        client: :cuda,
-        input_shardings: input_shardings ++ [%{2 => [0]}]
-      )
-
-    single_forward_stats =
-      measure(
-        single_forward,
-        single_forward_args,
-        warmup,
-        iterations,
-        calls_per_sample,
-        chain_length
-      )
-
-    tp_forward_stats =
-      measure(
-        tp_forward,
-        [tp_forward_args],
-        warmup,
-        iterations,
-        calls_per_sample,
-        chain_length
-      )
-
-    single_forward_backward_stats =
-      measure(
-        single_forward_backward,
-        single_gradient_args,
-        warmup,
-        iterations,
-        calls_per_sample,
-        chain_length
-      )
-
-    tp_forward_backward_stats =
-      measure(
-        tp_forward_backward,
-        [tp_gradient_args],
-        warmup,
-        iterations,
-        calls_per_sample,
-        chain_length
-      )
-
-    single_forward_us = single_forward_stats.median
-    tp_forward_us = tp_forward_stats.median
-    single_forward_backward_us = single_forward_backward_stats.median
-    tp_forward_backward_us = tp_forward_backward_stats.median
-
-    forward_flops =
-      4.0 * batch * q_heads * seqlen * seqlen * dim * if(causal, do: 0.5, else: 1.0)
-
-    IO.puts("""
-    FA3_TP_RESULT precision=#{precision} global_shape={#{batch},#{seqlen},#{q_heads},#{kv_heads},#{dim}} chain_length=#{chain_length} warmup=#{warmup} samples=#{iterations} calls_per_sample=#{calls_per_sample}
-    single_forward_logical_pflops=#{forward_flops / single_forward_us / 1.0e9}
-    tp2_forward_logical_pflops=#{forward_flops / tp_forward_us / 1.0e9}
-    tp2_forward_throughput_scaling=#{single_forward_us / tp_forward_us}
-    single_forward_backward_logical_pflops=#{3.0 * forward_flops / single_forward_backward_us / 1.0e9}
-    tp2_forward_backward_logical_pflops=#{3.0 * forward_flops / tp_forward_backward_us / 1.0e9}
-    tp2_forward_backward_throughput_scaling=#{single_forward_backward_us / tp_forward_backward_us}
-    single_forward_median_us=#{single_forward_us} p10_us=#{single_forward_stats.p10} p90_us=#{single_forward_stats.p90}
-    tp2_forward_median_us=#{tp_forward_us} p10_us=#{tp_forward_stats.p10} p90_us=#{tp_forward_stats.p90}
-    single_forward_backward_median_us=#{single_forward_backward_us} p10_us=#{single_forward_backward_stats.p10} p90_us=#{single_forward_backward_stats.p90}
-    tp2_forward_backward_median_us=#{tp_forward_backward_us} p10_us=#{tp_forward_backward_stats.p10} p90_us=#{tp_forward_backward_stats.p90}
-    """)
-
-    deallocate_result(single_gradient_args)
-    deallocate_result(tp_gradient_args)
-  end
-
-  defp measure(fun, args, warmup, iterations, calls_per_sample, work_per_call) do
-    for _ <- 1..warmup do
-      result = apply(fun, args)
-      deallocate_result(result)
-    end
-
-    samples =
-      for _ <- 1..iterations do
-        total =
-          for _ <- 1..calls_per_sample, reduce: 0 do
-            elapsed_sum ->
-              {elapsed, result} = :timer.tc(fn -> apply(fun, args) end)
-              deallocate_result(result)
-              elapsed_sum + elapsed
-          end
-
-        total / calls_per_sample / work_per_call
-      end
-
-    samples = Enum.sort(samples)
-
-    %{
-      median: percentile(samples, 0.50),
-      p10: percentile(samples, 0.10),
-      p90: percentile(samples, 0.90)
-    }
-  end
-
-  defp percentile(samples, quantile) do
-    Enum.at(samples, floor((length(samples) - 1) * quantile))
-  end
-
-  defp deallocate_result(results) when is_list(results) do
-    Enum.each(results, &deallocate_result/1)
-  end
-
-  defp deallocate_result(result), do: Nx.backend_deallocate(result)
-
   defp env_boolean(name, default) do
     case System.get_env(name) do
       nil -> default
       value when value in ["1", "true", "TRUE"] -> true
       value when value in ["0", "false", "FALSE"] -> false
       value -> flunk("#{name} must be true/false or 1/0, got #{inspect(value)}")
-    end
-  end
-
-  defp env_integer(name, default) do
-    case System.get_env(name) do
-      nil ->
-        default
-
-      value ->
-        case Integer.parse(value) do
-          {integer, ""} when integer > 0 -> integer
-          _ -> flunk("#{name} must be a positive integer, got #{inspect(value)}")
-        end
-    end
-  end
-
-  defp benchmark_precisions do
-    case System.get_env("FA3_TP_PRECISION", "both") do
-      "both" -> [bf16: {:bf, 16}, fp16: {:f, 16}]
-      "bf16" -> [bf16: {:bf, 16}]
-      "fp16" -> [fp16: {:f, 16}]
-      value -> flunk("FA3_TP_PRECISION must be bf16, fp16, or both, got #{inspect(value)}")
     end
   end
 end
