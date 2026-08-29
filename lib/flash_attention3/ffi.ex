@@ -146,11 +146,11 @@ defmodule FlashAttention3.FFI do
   # The zeros are never read: EXLA drops this branch when a spec
   # is returned, and the kernel writes its own scratch when not.
   defp pad_scratch(results, templates, result_count) do
-    workspaces =
+    scratch =
       for template <- Enum.drop(templates, result_count),
           do: Nx.broadcast(Nx.tensor(0, type: template.type), template.shape)
 
-    (Tuple.to_list(results) ++ workspaces) |> List.to_tuple()
+    (Tuple.to_list(results) ++ scratch) |> List.to_tuple()
   end
 
   # Inverse of pad_scratch/3.

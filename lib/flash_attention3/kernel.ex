@@ -17,7 +17,7 @@ defmodule FlashAttention3.Kernel do
   #   i batch      j seqlen_q   k seqlen_k   lm q_heads (l groups x m kv_heads)
   #   n head_dim   o value_dim
   #
-  # Backward adds the rounded workspace extents:
+  # Backward adds the rounded scratch extents:
   #
   #   p seqlen_q_rounded   q seqlen_k_rounded   r q_blocks
   #
@@ -143,10 +143,10 @@ defmodule FlashAttention3.Kernel do
   @doc """
   Returns the rounded extents that size the backward scratch buffers.
 
-  This mirrors the tile selection in the FA3 backward kernel. The workspaces
-  are compiler-owned results rather than handler-side scratch so that they stay
-  capturable in a CUDA command buffer, which is why their geometry has to be
-  known here.
+  This mirrors the tile selection in the FA3 backward kernel. The scratch
+  buffers are declared as results rather than allocated by the handler so that
+  they stay capturable in a CUDA command buffer, which is why their geometry
+  has to be known here.
   """
   def scratch_extents(%{head_dim: head_dim, seqlen_q: seqlen_q, seqlen_k: seqlen_k}, causal) do
     block_m = if head_dim <= 128, do: if(causal, do: 64, else: 80), else: 64
