@@ -23,6 +23,12 @@ defmodule FlashAttention3 do
   initializers, so the application loads it into the OS process once, before
   compiling anything that contains an FA3 call.
 
+  Gradients are first order only. `Nx.Defn.grad/2` over `attention/4` emits the
+  backward kernel, but differentiating that gradient again derives from
+  `FlashAttention3.DenseAttention` and drops both calls, since the backward
+  block carries no gradient of its own and FA3 has no second-order kernel.
+  That path is silent and materializes the score matrix.
+
   ## Options
 
     * `:causal` - applies a causal mask. Requires equal q/k sequence lengths.

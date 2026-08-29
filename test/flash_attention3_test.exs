@@ -105,6 +105,31 @@ defmodule FlashAttention3Test do
       assert mlir =~ "need_replication={i, j, k, l, n, o, p, q, r}, custom>"
     end
 
+    test "a reused output still takes one backward" do
+      {q, k, v} = operands()
+      doutput = bf16({1, 8, 8, 128})
+
+      fun = fn q, k, v, doutput ->
+        Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
+          {output, _lse} = host_forward(q, k, v, true)
+
+          output
+          |> Nx.multiply(doutput)
+          |> Nx.sum()
+          |> Nx.add(Nx.sum(Nx.add(output, 1.0)))
+        end)
+      end
+
+      %{mlir_module: mlir} = EXLA.to_mlir_module(fun, [q, k, v, doutput], client: :host)
+
+      # Grad accumulates the cotangents from both consumers before reaching
+      # the custom_grad node, so one forward still costs one backward rather
+      # than one per use.
+      assert calls(mlir, "fa3_forward_bf16") == 1
+      assert calls(mlir, "fa3_backward_bf16") == 1
+      refute mlir =~ "stablehlo.dot_general"
+    end
+
     test "repeated calls stay inside one executable" do
       {q, k, v} = operands()
       doutput = bf16({1, 8, 8, 128})
