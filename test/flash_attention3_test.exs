@@ -12,7 +12,13 @@ defmodule FlashAttention3Test do
     {q, k, v}
   end
 
-  defn(wrapped(q, k, v), do: FlashAttention3.attention(q, k, v, causal: true))
+  defn wrapped(q, k, v) do
+    FlashAttention3.attention(q, k, v, causal: true)
+  end
+
+  defn wrapped_with_lse(q, k, v) do
+    FlashAttention3.attention_with_lse(q, k, v, causal: true)
+  end
 
   test "attention returns the output alone and matches the definition" do
     {q, k, v} = fixtures()
@@ -45,6 +51,34 @@ defmodule FlashAttention3Test do
         wrapped(q, k, v) |> Nx.multiply(doutput) |> Nx.sum()
       end)
 
+    expected = Reference.backward(q, k, v, doutput, causal: true)
+
+    Enum.zip(Tuple.to_list(actual), Tuple.to_list(expected))
+    |> Enum.each(fn {actual, expected} -> assert_all_close(actual, expected) end)
+  end
+
+  test "jit returns the lse alongside the output" do
+    {q, k, v} = fixtures()
+
+    {output, lse} = EXLA.jit(&wrapped_with_lse/3, client: :host).(q, k, v)
+    {expected_output, expected_lse} = Reference.attention(q, k, v, causal: true)
+
+    assert_all_close(output, expected_output)
+    assert_all_close(lse, expected_lse)
+  end
+
+  test "the lse is not differentiable but does not block the output gradient" do
+    {q, k, v} = fixtures()
+    doutput = Nx.iota(q.shape, type: {:f, 32}) |> Nx.remainder(17) |> Nx.divide(19)
+
+    gradient = fn q, k, v, doutput ->
+      Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
+        {output, _lse} = wrapped_with_lse(q, k, v)
+        output |> Nx.multiply(doutput) |> Nx.sum()
+      end)
+    end
+
+    actual = EXLA.jit(gradient, client: :host).(q, k, v, doutput)
     expected = Reference.backward(q, k, v, doutput, causal: true)
 
     Enum.zip(Tuple.to_list(actual), Tuple.to_list(expected))
