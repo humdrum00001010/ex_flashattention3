@@ -7,7 +7,12 @@ defmodule FlashAttention3.FFI do
   so they are declared here, dropped here, and never reach the operation.
   """
 
-  alias FlashAttention3.{Block, Definition}
+  alias FlashAttention3.{Block, DenseAttention}
+
+  # The kernel returns its semantic results first and its compiler-owned
+  # workspaces after. These are the counts of the former.
+  @forward_results 2
+  @backward_results 3
 
   @doc """
   Runs the forward custom call and returns `{output, lse}`.
@@ -24,9 +29,9 @@ defmodule FlashAttention3.FFI do
     block
     |> struct!(causal: causal, softmax_scale: softmax_scale)
     |> Nx.block([q, k, v], List.to_tuple(results), fn block, q, k, v ->
-      Definition.attention(q, k, v, options(block))
+      DenseAttention.attention(q, k, v, options(block))
     end)
-    |> semantic(2)
+    |> drop_workspaces(@forward_results)
   end
 
   @doc """
@@ -66,14 +71,14 @@ defmodule FlashAttention3.FFI do
       [q, k, v, output, lse, doutput],
       List.to_tuple(results),
       fn block, q, k, v, _output, _lse, doutput ->
-        Definition.backward(q, k, v, doutput, options(block))
+        DenseAttention.backward(q, k, v, doutput, options(block))
       end
     )
-    |> semantic(3)
+    |> drop_workspaces(@backward_results)
   end
 
   defp options(block), do: block |> Map.from_struct() |> Map.to_list()
 
-  defp semantic(native, count),
-    do: native |> Tuple.to_list() |> Enum.take(count) |> List.to_tuple()
+  defp drop_workspaces(native, result_count),
+    do: native |> Tuple.to_list() |> Enum.take(result_count) |> List.to_tuple()
 end

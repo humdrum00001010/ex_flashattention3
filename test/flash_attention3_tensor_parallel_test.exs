@@ -1,7 +1,7 @@
 defmodule FlashAttention3.TensorParallelTest do
   use ExUnit.Case, async: true
 
-  alias FlashAttention3.{Definition, TensorParallel}
+  alias FlashAttention3.{DenseAttention, TensorParallel}
 
   defp fixtures do
     q = Nx.iota({1, 8, 8, 4}, type: {:f, 32}) |> Nx.divide(100)
@@ -12,13 +12,13 @@ defmodule FlashAttention3.TensorParallelTest do
 
   test "GQA head sharding reconstructs the unsharded attention result" do
     {q, k, v} = fixtures()
-    {expected_output, expected_lse} = Definition.attention(q, k, v, causal: true)
+    {expected_output, expected_lse} = DenseAttention.attention(q, k, v, causal: true)
 
     {output, lse} =
       q
       |> TensorParallel.shard_inputs(k, v, 2)
       |> Enum.map(fn [q_shard, k_shard, v_shard] ->
-        Definition.attention(q_shard, k_shard, v_shard, causal: true)
+        DenseAttention.attention(q_shard, k_shard, v_shard, causal: true)
       end)
       |> TensorParallel.assemble_outputs()
 
@@ -42,11 +42,11 @@ defmodule FlashAttention3.TensorParallelTest do
 
     expected =
       Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        {output, _lse} = Definition.attention(q, k, v, causal: true)
+        {output, _lse} = DenseAttention.attention(q, k, v, causal: true)
         output |> Nx.multiply(doutput) |> Nx.sum()
       end)
 
-    actual = Definition.backward(q, k, v, doutput, causal: true)
+    actual = DenseAttention.backward(q, k, v, doutput, causal: true)
 
     Enum.zip(Tuple.to_list(actual), Tuple.to_list(expected))
     |> Enum.each(fn {actual, expected} -> assert_all_close(actual, expected) end)

@@ -1,20 +1,22 @@
-defmodule FlashAttention3.Definition do
+defmodule FlashAttention3.DenseAttention do
   @moduledoc """
-  Attention written in plain Nx.
+  Attention with the score matrix materialized.
 
-  `Nx.Defn.Expr.block/4` applies a block's default implementation on every
-  trace, before any backend decides whether to replace it, so `Nx.block/4`
-  cannot be used without one. Under `Nx.Defn.Evaluator` it is what actually
-  runs. It is therefore required by the API rather than chosen as a policy, and
-  it is not a fallback: `FlashAttention3.Block` raises rather than skipping on a
-  non-CUDA client, so EXLA never compiles this.
+  This is the formulation FlashAttention replaces: it allocates the full
+  `{batch, heads, seqlen_q, seqlen_k}` scores, softmaxes them, and multiplies
+  by V. PyTorch calls this SDPA backend `math` and Transformers calls it
+  `eager`. It is deliberately not named for FlashAttention, because it is the
+  thing FlashAttention is not.
 
-  It materializes the full score matrix, which is the allocation
-  FlashAttention exists to avoid. That is exactly why it is not reachable as a
-  fallback.
+  It exists because `Nx.Defn.Expr.block/4` applies a block's default
+  implementation on every trace, before any backend decides whether to replace
+  it, so `Nx.block/4` cannot be used without one, and under
+  `Nx.Defn.Evaluator` it is what runs. It is required by the Nx API rather than
+  offered as a fallback: `FlashAttention3.Block` raises rather than skipping on
+  a non-CUDA client, so EXLA never compiles it.
   """
 
-  alias FlashAttention3.Definition.{Gqa, Scores}
+  alias FlashAttention3.DenseAttention.{Gqa, Scores}
 
   @doc """
   Attention over BSHD tensors, returning `{output, lse}`.

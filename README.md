@@ -45,9 +45,11 @@ no fallback: a score-matrix attention would silently change the memory
 complexity of the model that called it, which is the cost FlashAttention exists
 to avoid.
 
-`FlashAttention3.Definition` exists only because `Nx.block/4` applies a block's
-default implementation on every trace and cannot be used without one. The block
-raises rather than skipping, so EXLA never compiles it.
+`FlashAttention3.DenseAttention` is the formulation FlashAttention replaces —
+the materialized score matrix, PyTorch's `math` backend. It exists only because
+`Nx.block/4` applies a block's default implementation on every trace and cannot
+be used without one. The block raises rather than skipping, so EXLA never
+compiles it.
 
 ## Layout
 
@@ -90,8 +92,8 @@ installed. The native build is torch-free; it links the FA3/CUTLASS objects,
 ## CPU preflight
 
 CPU verifies StableHLO syntax, precision target selection, layouts, Shardy
-attributes, the head-parallel sharding policy, and the analytic backward of the
-Nx definition. Kernel numerics are not checked here and cannot be: there is no
+attributes, the head-parallel sharding policy, and the analytic backward of
+`DenseAttention`. Kernel numerics are not checked here and cannot be: there is no
 CPU path through FA3. It does not prove that a CUDA symbol loads or that TP
 executes on physical GPUs.
 

@@ -1,4 +1,4 @@
-defmodule FlashAttention3.Definition.Gqa do
+defmodule FlashAttention3.DenseAttention.Gqa do
   @moduledoc false
 
   @doc """

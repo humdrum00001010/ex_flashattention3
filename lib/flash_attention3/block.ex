@@ -4,7 +4,7 @@ defmodule FlashAttention3.Block do
   @doc """
   Refuses to lower on a client that cannot run the kernel.
 
-  Skipping here would compile `FlashAttention3.Definition` instead, silently
+  Skipping here would compile `FlashAttention3.DenseAttention` instead, silently
   replacing the kernel with a score-matrix attention and changing the memory
   complexity of the caller.
   """

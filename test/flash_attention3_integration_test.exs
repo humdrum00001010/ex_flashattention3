@@ -106,10 +106,10 @@ defmodule FlashAttention3.IntegrationTest do
     assert Enum.map(layer_results, & &1.data.buffer.device_id) == [0, 1]
 
     {expected_output, _expected_lse} =
-      FlashAttention3.Definition.attention(q_f32, k_f32, v_f32, causal: causal)
+      FlashAttention3.DenseAttention.attention(q_f32, k_f32, v_f32, causal: causal)
 
     {baseline_output, _baseline_lse} =
-      FlashAttention3.Definition.attention(q, k, v, causal: causal)
+      FlashAttention3.DenseAttention.attention(q, k, v, causal: causal)
 
     expected_projection =
       expected_output
@@ -284,7 +284,7 @@ defmodule FlashAttention3.IntegrationTest do
 
     reference_gradient = fn q, k, v, doutput ->
       Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
-        {output, _lse} = FlashAttention3.Definition.attention(q, k, v, causal: causal)
+        {output, _lse} = FlashAttention3.DenseAttention.attention(q, k, v, causal: causal)
         output |> Nx.multiply(doutput) |> Nx.sum()
       end)
     end
@@ -292,7 +292,7 @@ defmodule FlashAttention3.IntegrationTest do
     low_precision_gradient = fn q, k, v, doutput ->
       Nx.Defn.grad({q, k, v}, fn {q, k, v} ->
         {output, _lse} =
-          FlashAttention3.Definition.attention(q, k, v, causal: causal, upcast: false)
+          FlashAttention3.DenseAttention.attention(q, k, v, causal: causal, upcast: false)
 
         output |> Nx.multiply(doutput) |> Nx.sum()
       end)
@@ -425,7 +425,7 @@ defmodule FlashAttention3.IntegrationTest do
   end
 
   defp apply_reference({q, k, v}, causal),
-    do: FlashAttention3.Definition.attention(q, k, v, causal: causal)
+    do: FlashAttention3.DenseAttention.attention(q, k, v, causal: causal)
 
   defp map_tensors({left, right}, fun), do: {fun.(left), fun.(right)}
 
