@@ -1,11 +1,11 @@
-defmodule FA3TPExperiment.MixProject do
+defmodule ExFlashAttention3.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :fa3_tp_experiment,
+      app: :ex_flashattention3,
       version: "0.1.0",
-      elixir: "~> 1.17",
+      elixir: "~> 1.20.2",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps()
