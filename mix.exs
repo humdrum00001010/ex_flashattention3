@@ -21,13 +21,13 @@ defmodule FA3TPExperiment.MixProject do
 
   defp deps do
     worktree =
-      System.get_env("NX_OPERATION_ATTRIBUTES_WORKTREE") ||
+      System.get_env("NX_MLIR_ATTRIBUTES_WORKTREE") ||
         Path.expand("../../nx-upstream-main", __DIR__)
 
     unless File.dir?(Path.join(worktree, "nx")) and File.dir?(Path.join(worktree, "exla")) do
       Mix.raise("""
-      NX_OPERATION_ATTRIBUTES_WORKTREE must point to the Nx worktree containing
-      EXLA.CustomCall.Spec.operation_attributes, got: #{worktree}
+      NX_MLIR_ATTRIBUTES_WORKTREE must point to the Nx worktree containing
+      EXLA.CustomCall.Spec.mlir_attributes, got: #{worktree}
       """)
     end
 

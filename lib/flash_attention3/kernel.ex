@@ -233,7 +233,7 @@ defmodule FlashAttention3.Kernel do
     %Spec{
       call_target_name: Map.fetch!(call.targets, type),
       attributes: handler_attributes(causal, softmax_scale),
-      operation_attributes: [
+      mlir_attributes: [
         {"operand_layouts", layouts(call.operands)},
         {"result_layouts", layouts(call.results)},
         {"sdy.sharding_rule", sharding_rule(call, sizes)}

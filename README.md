@@ -82,14 +82,14 @@ Use an Elixir/OTP pair supported by the modified worktree. The hardware run
 used Elixir 1.20.2 and OTP 29.0.2.
 
 ```sh
-export NX_OPERATION_ATTRIBUTES_WORKTREE=/absolute/path/to/nx-worktree
+export NX_MLIR_ATTRIBUTES_WORKTREE=/absolute/path/to/nx-worktree
 export XLA_TARGET=cuda13
 mix deps.get
 mix compile
 
 make -C native \
   FA3_ROOT=/absolute/path/to/flash-attention \
-  XLA_EXTENSION_DIR="$NX_OPERATION_ATTRIBUTES_WORKTREE/exla/cache/xla_extension" \
+  XLA_EXTENSION_DIR="$NX_MLIR_ATTRIBUTES_WORKTREE/exla/cache/xla_extension" \
   OUTPUT=/absolute/path/to/libfa3_xla.so
 ```
 
