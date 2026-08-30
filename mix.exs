@@ -20,11 +20,6 @@ defmodule ExFlashAttention3.MixProject do
   defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
-    # `EXLA.CustomCall.Spec.mlir_attributes` is unreleased, so nx and exla come
-    # from the branch carrying it. Both live in one repository, so each names
-    # its `subdir`; without that Mix reads the repository root, which is itself
-    # called nx. `override` is needed because exla declares nx from Hex. Pinned
-    # by commit so a force-push cannot change what this builds against.
     [
       {:nx,
        github: "humdrum00001010/nx",
