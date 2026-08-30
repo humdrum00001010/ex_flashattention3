@@ -175,7 +175,7 @@ defmodule FlashAttention3.IntegrationTest do
       flunk("FA3_TP_DYLIB does not name a regular file: #{path}")
     end
 
-    assert :ok = EXLA.NIF.load_dylib(path)
+    assert :ok = EXLA.load_dylib(path)
   end
 
   defp assert_hopper_topology! do

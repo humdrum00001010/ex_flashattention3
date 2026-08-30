@@ -33,7 +33,7 @@ registered by the library's static initializers, so loading it is the whole
 registration step:
 
 ```elixir
-:ok = EXLA.NIF.load_dylib("/absolute/path/to/libfa3_xla.so")
+:ok = EXLA.load_dylib("/absolute/path/to/libfa3_xla.so")
 ```
 
 Q, K, and V are BSHD `{batch, sequence, heads, dim}`. The result is the
