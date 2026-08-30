@@ -20,15 +20,13 @@ defmodule FA3TPExperiment.MixProject do
   defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
-    worktree =
-      System.get_env("NX_MLIR_ATTRIBUTES_WORKTREE") ||
-        Path.expand("../../nx-upstream-main", __DIR__)
+    # A sibling Nx checkout carrying `EXLA.CustomCall.Spec.mlir_attributes`,
+    # which is unreleased. Points at the branch it lives on until it lands in
+    # a release, at which point this becomes an ordinary version requirement.
+    worktree = Path.expand("../nx-operation-attributes-pr", __DIR__)
 
     unless File.dir?(Path.join(worktree, "nx")) and File.dir?(Path.join(worktree, "exla")) do
-      Mix.raise("""
-      NX_MLIR_ATTRIBUTES_WORKTREE must point to the Nx worktree containing
-      EXLA.CustomCall.Spec.mlir_attributes, got: #{worktree}
-      """)
+      Mix.raise("expected an Nx worktree with nx/ and exla/ at #{worktree}")
     end
 
     [
