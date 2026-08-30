@@ -20,18 +20,21 @@ defmodule ExFlashAttention3.MixProject do
   defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
-    # A sibling Nx checkout carrying `EXLA.CustomCall.Spec.mlir_attributes`,
-    # which is unreleased. Points at the branch it lives on until it lands in
-    # a release, at which point this becomes an ordinary version requirement.
-    worktree = Path.expand("../nx-operation-attributes-pr", __DIR__)
-
-    unless File.dir?(Path.join(worktree, "nx")) and File.dir?(Path.join(worktree, "exla")) do
-      Mix.raise("expected an Nx worktree with nx/ and exla/ at #{worktree}")
-    end
-
+    # `EXLA.CustomCall.Spec.mlir_attributes` is unreleased, so nx and exla come
+    # from the branch carrying it. Both live in one repository, so each names
+    # its `subdir`; without that Mix reads the repository root, which is itself
+    # called nx. `override` is needed because exla declares nx from Hex. Pinned
+    # by commit so a force-push cannot change what this builds against.
     [
-      {:nx, path: Path.join(worktree, "nx"), override: true},
-      {:exla, path: Path.join(worktree, "exla")}
+      {:nx,
+       github: "humdrum00001010/nx",
+       ref: "62ecad529e24ae534eb4082e67153b0b3e12db73",
+       subdir: "nx",
+       override: true},
+      {:exla,
+       github: "humdrum00001010/nx",
+       ref: "62ecad529e24ae534eb4082e67153b0b3e12db73",
+       subdir: "exla"}
     ]
   end
 end
