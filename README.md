@@ -33,7 +33,7 @@ registered by the library's static initializers, so loading it is the whole
 registration step:
 
 ```elixir
-:ok = EXLA.NIF.load_dylib("/absolute/path/to/libfa3_xla.so")
+:ok = EXLA.load_dylib("/absolute/path/to/libfa3_xla.so")
 ```
 
 Q, K, and V are BSHD `{batch, sequence, heads, dim}`. The result is the
@@ -82,16 +82,18 @@ Use an Elixir/OTP pair supported by the modified worktree. The hardware run
 used Elixir 1.20.2 and OTP 29.0.2.
 
 ```sh
-export NX_OPERATION_ATTRIBUTES_WORKTREE=/absolute/path/to/nx-worktree
 export XLA_TARGET=cuda13
 mix deps.get
 mix compile
 
 make -C native \
-  FA3_ROOT=/absolute/path/to/flash-attention \
-  XLA_EXTENSION_DIR="$NX_OPERATION_ATTRIBUTES_WORKTREE/exla/cache/xla_extension" \
-  OUTPUT=/absolute/path/to/libfa3_xla.so
+  FA3_ROOT=../../build/flash-attention \
+  XLA_EXTENSION_DIR=../../nx-upstream-main/exla/cache/xla_extension \
+  OUTPUT=../../artifacts/libfa3_xla.so
 ```
+
+Every path is the sibling layout above. `mix.exs` finds the Nx worktree the
+same way, so there is nothing to export for it.
 
 EXLA reuses a matching XLA archive from its cache when one is already
 installed. The native build is torch-free; it links the FA3/CUTLASS objects,
@@ -112,15 +114,15 @@ mix test
 
 ## Two-H100 correctness gate
 
-Use a new empty HLO directory for every process. `XLA_FLAGS` is read when the
-BEAM initializes, and the test rejects stale dumps.
+The test reads the library and the dump directory from the sibling layout, and
+empties the dump directory first so a stale one cannot satisfy the audits.
+`XLA_FLAGS` has to name the same directory, because the VM reads it at
+startup.
 
 ```sh
-export FA3_TP_DYLIB=/absolute/path/to/libfa3_xla.so
-export FA3_TP_HLO_DIR=/absolute/path/to/new-empty-hlo-dir
-export XLA_FLAGS="--xla_gpu_enable_command_buffer=+CUSTOM_CALL --xla_dump_to=$FA3_TP_HLO_DIR --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout"
+export XLA_FLAGS="--xla_gpu_enable_command_buffer=+CUSTOM_CALL --xla_dump_to=../hlo --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout"
 
-mix test test/fa3_tp_integration_test.exs --include integration
+mix test test/flash_attention3_integration_test.exs --include integration
 ```
 
 The gate requires, in order:

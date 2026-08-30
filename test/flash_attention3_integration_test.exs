@@ -1,16 +1,19 @@
 defmodule FlashAttention3.IntegrationTest do
   use ExUnit.Case, async: false
 
+  # Siblings of this checkout, matching the layout in the README. XLA_FLAGS
+  # must name @hlo_dir too, since the VM reads it at startup.
+  @dylib Path.expand("../../artifacts/libfa3_xla.so", __DIR__)
+  @hlo_dir Path.expand("../../hlo", __DIR__)
+
   @moduletag :integration
   @moduletag timeout: 600_000
 
   # Run on a fresh 2xH100 process (XLA_FLAGS is read at VM initialization):
   #
   #   XLA_TARGET=cuda13 \
-  #   FA3_TP_DYLIB=/absolute/path/libfa3_xla.so \
-  #   FA3_TP_HLO_DIR=/fresh/hlo/directory \
-  #   XLA_FLAGS="--xla_dump_to=/fresh/hlo/directory --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout" \
-  #   mix test test/fa3_tp_integration_test.exs --include integration
+  #   XLA_FLAGS="--xla_dump_to=../hlo --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout" \
+  #   mix test test/flash_attention3_integration_test.exs --include integration
   #
 
   # External-library contract exercised by this test:
@@ -31,7 +34,7 @@ defmodule FlashAttention3.IntegrationTest do
     hlo_dir = fresh_hlo_dir!()
 
     target = "fa3_forward_bf16"
-    causal = env_boolean("FA3_TP_CAUSAL", true)
+    causal = true
     mesh = %Nx.Mesh{name: "fa3_tp", shape: {2}}
     input_shardings = [%{2 => [0]}, %{2 => [0]}, %{2 => [0]}]
 
@@ -167,15 +170,11 @@ defmodule FlashAttention3.IntegrationTest do
   end
 
   defp load_external_fa3! do
-    path =
-      System.get_env("FA3_TP_DYLIB") ||
-        flunk("set FA3_TP_DYLIB to the torch-free FA3 XLA FFI shared library")
-
-    unless File.regular?(path) do
-      flunk("FA3_TP_DYLIB does not name a regular file: #{path}")
+    unless File.regular?(@dylib) do
+      flunk("build the FA3 library first; expected it at #{@dylib}")
     end
 
-    assert :ok = EXLA.NIF.load_dylib(path)
+    assert :ok = EXLA.load_dylib(@dylib)
   end
 
   defp assert_hopper_topology! do
@@ -223,21 +222,14 @@ defmodule FlashAttention3.IntegrationTest do
     end
   end
 
+  # XLA dumps here because XLA_FLAGS says so, and XLA_FLAGS is read when the VM
+  # starts, so the path cannot be chosen at run time. Emptied first: a stale
+  # dump from an earlier run would pass the audits below without proving
+  # anything about this one.
   defp fresh_hlo_dir! do
-    path =
-      System.get_env("FA3_TP_HLO_DIR") ||
-        flunk("""
-        set FA3_TP_HLO_DIR to a fresh directory and start the VM with:
-        XLA_FLAGS="--xla_dump_to=DIR --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=spmd|propagation|layout"
-        """)
-
-    File.mkdir_p!(path)
-
-    unless Path.wildcard(Path.join(path, "**/*")) == [] do
-      flunk("FA3_TP_HLO_DIR must be empty so stale compiler evidence cannot pass: #{path}")
-    end
-
-    path
+    File.rm_rf!(@hlo_dir)
+    File.mkdir_p!(@hlo_dir)
+    @hlo_dir
   end
 
   defp audit_attention_hlo!(hlo_dir, target) do
@@ -438,13 +430,4 @@ defmodule FlashAttention3.IntegrationTest do
   end
 
   defp to_host(value), do: Nx.backend_copy(value, Nx.BinaryBackend)
-
-  defp env_boolean(name, default) do
-    case System.get_env(name) do
-      nil -> default
-      value when value in ["1", "true", "TRUE"] -> true
-      value when value in ["0", "false", "FALSE"] -> false
-      value -> flunk("#{name} must be true/false or 1/0, got #{inspect(value)}")
-    end
-  end
 end

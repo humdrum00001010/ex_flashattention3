@@ -1,11 +1,11 @@
-defmodule FA3TPExperiment.MixProject do
+defmodule ExFlashAttention3.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :fa3_tp_experiment,
+      app: :ex_flashattention3,
       version: "0.1.0",
-      elixir: "~> 1.17",
+      elixir: "~> 1.20.2",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps()
@@ -20,20 +20,21 @@ defmodule FA3TPExperiment.MixProject do
   defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
-    worktree =
-      System.get_env("NX_OPERATION_ATTRIBUTES_WORKTREE") ||
-        Path.expand("../../nx-upstream-main", __DIR__)
-
-    unless File.dir?(Path.join(worktree, "nx")) and File.dir?(Path.join(worktree, "exla")) do
-      Mix.raise("""
-      NX_OPERATION_ATTRIBUTES_WORKTREE must point to the Nx worktree containing
-      EXLA.CustomCall.Spec.operation_attributes, got: #{worktree}
-      """)
-    end
-
+    # `EXLA.CustomCall.Spec.mlir_attributes` is unreleased, so nx and exla come
+    # from the branch carrying it. Both live in one repository, so each names
+    # its `subdir`; without that Mix reads the repository root, which is itself
+    # called nx. `override` is needed because exla declares nx from Hex. Pinned
+    # by commit so a force-push cannot change what this builds against.
     [
-      {:nx, path: Path.join(worktree, "nx"), override: true},
-      {:exla, path: Path.join(worktree, "exla")}
+      {:nx,
+       github: "humdrum00001010/nx",
+       ref: "62ecad529e24ae534eb4082e67153b0b3e12db73",
+       subdir: "nx",
+       override: true},
+      {:exla,
+       github: "humdrum00001010/nx",
+       ref: "62ecad529e24ae534eb4082e67153b0b3e12db73",
+       subdir: "exla"}
     ]
   end
 end

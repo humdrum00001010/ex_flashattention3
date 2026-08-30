@@ -31,21 +31,21 @@ defmodule FlashAttention3.KernelTest do
     assert %Spec{
              call_target_name: "fa3_forward_bf16",
              attributes: [{"causal", "true"}, {"softmax_scale", "0.125 : f32"}],
-             operation_attributes: operation_attributes
+             mlir_attributes: mlir_attributes
            } = Kernel.forward(forward_operands({:bf, 16}), true, 0.125)
 
     assert {"operand_layouts",
             "[dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
               "dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
-              "dense<[3, 2, 1, 0]> : tensor<4xindex>]"} in operation_attributes
+              "dense<[3, 2, 1, 0]> : tensor<4xindex>]"} in mlir_attributes
 
     assert {"result_layouts",
             "[dense<[3, 2, 1, 0]> : tensor<4xindex>, " <>
               "dense<[2, 1, 0]> : tensor<3xindex>, " <>
-              "dense<[0]> : tensor<1xindex>]"} in operation_attributes
+              "dense<[0]> : tensor<1xindex>]"} in mlir_attributes
 
     assert {"sdy.sharding_rule", sharding_rule} =
-             List.keyfind(operation_attributes, "sdy.sharding_rule", 0)
+             List.keyfind(mlir_attributes, "sdy.sharding_rule", 0)
 
     assert sharding_rule =~ "([i, j, ml, n], [i, k, m, n], [i, k, m, o])->"
     assert sharding_rule =~ "([i, j, ml, o], [i, ml, j], [i])"
@@ -60,20 +60,20 @@ defmodule FlashAttention3.KernelTest do
     assert %Spec{
              call_target_name: "fa3_backward_bf16",
              attributes: [{"causal", "true"}, {"softmax_scale", "0.125 : f32"}],
-             operation_attributes: operation_attributes
+             mlir_attributes: mlir_attributes
            } = Kernel.backward(backward_operands({:bf, 16}), true, 0.125)
 
     assert {"operand_layouts", operand_layouts} =
-             List.keyfind(operation_attributes, "operand_layouts", 0)
+             List.keyfind(mlir_attributes, "operand_layouts", 0)
 
     assert {"result_layouts", result_layouts} =
-             List.keyfind(operation_attributes, "result_layouts", 0)
+             List.keyfind(mlir_attributes, "result_layouts", 0)
 
     assert length(String.split(operand_layouts, "dense<")) - 1 == 6
     assert length(String.split(result_layouts, "dense<")) - 1 == 9
 
     assert {"sdy.sharding_rule", sharding_rule} =
-             List.keyfind(operation_attributes, "sdy.sharding_rule", 0)
+             List.keyfind(mlir_attributes, "sdy.sharding_rule", 0)
 
     # seqlen_q rounds to 64 with the causal head_dim-128 block, and 16 keys
     # round to 128, giving one query block.

@@ -11,3 +11,4 @@
 *.so
 *.sqlite
 *.sqlite-journal
+.claude-flow

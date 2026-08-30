@@ -18,10 +18,10 @@ defmodule FlashAttention3 do
   the tests compare against, but it materializes the score matrix, so treat
   those paths as small-shape only.
 
-  Loading the native library is the application's job. The FFI targets and the
-  custom-call partitioner are registered by `libfa3_xla.so`'s static
-  initializers, so the application loads it into the OS process once, before
-  compiling anything that contains an FA3 call.
+  Loading the native library is the application's job, with
+  `EXLA.load_dylib/1`. The FFI targets and the custom-call partitioner are
+  registered by `libfa3_xla.so`'s static initializers, so it has to be loaded
+  before EXLA compiles anything that emits one of those target names.
 
   Gradients are first order only. `Nx.Defn.grad/2` over `attention/4` emits the
   backward kernel, but differentiating that gradient again derives from
