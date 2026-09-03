@@ -11,6 +11,18 @@ defmodule FlashAttention3Test do
     {bf16({1, 8, 8, 128}), bf16({1, 8, 2, 128}), bf16({1, 8, 2, 128})}
   end
 
+  describe "the EXLA custom-call boundary" do
+    test "loads handlers through EXLA's public API" do
+      missing =
+        Path.join(
+          System.tmp_dir!(),
+          "ex_flashattention3-missing-#{System.unique_integer([:positive])}.so"
+        )
+
+      assert_raise ArgumentError, fn -> EXLA.load_dylib(missing) end
+    end
+  end
+
   describe "the operation refuses to run without the kernel" do
     test "a host client has nothing to fall back to" do
       {q, k, v} = operands()
